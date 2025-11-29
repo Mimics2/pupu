@@ -506,34 +506,59 @@ class ChannelBot:
             )
             return
         
-        # Сохраняем данные поста
-        post_data = {
-            'type': 'text',
-            'text': message.text or '',
-            'message_id': message.message_id,
-            'chat_id': message.chat_id
-        }
+        # Сохраняем данные поста - ОСНОВНОЕ ИСПРАВЛЕНИЕ!
+        post_data = {}
         
-        # Обработка медиа
-        if message.photo:
-            post_data.update({
+        # Определяем тип контента
+        if message.text and not (message.photo or message.video or message.document):
+            # Только текст
+            post_data = {
+                'type': 'text',
+                'text': message.text,
+                'message_id': message.message_id,
+                'chat_id': message.chat_id
+            }
+        elif message.photo:
+            # Фото с текстом или без
+            post_data = {
                 'type': 'photo',
                 'file_id': message.photo[-1].file_id,
-                'caption': message.caption or ''
-            })
+                'caption': message.caption or '',
+                'text': message.caption or '',  # Сохраняем текст подписи
+                'message_id': message.message_id,
+                'chat_id': message.chat_id
+            }
         elif message.video:
-            post_data.update({
-                'type': 'video', 
+            # Видео с текстом или без
+            post_data = {
+                'type': 'video',
                 'file_id': message.video.file_id,
-                'caption': message.caption or ''
-            })
+                'caption': message.caption or '',
+                'text': message.caption or '',  # Сохраняем текст подписи
+                'message_id': message.message_id,
+                'chat_id': message.chat_id
+            }
         elif message.document:
-            post_data.update({
+            # Документ с текстом или без
+            post_data = {
                 'type': 'document',
                 'file_id': message.document.file_id,
-                'caption': message.caption or ''
-            })
+                'caption': message.caption or '',
+                'text': message.caption or '',  # Сохраняем текст подписи
+                'message_id': message.message_id,
+                'chat_id': message.chat_id
+            }
+        else:
+            # Неизвестный тип сообщения
+            await message.reply_text(
+                "❌ Неподдерживаемый тип сообщения. Отправьте текст, фото, видео или документ.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                ])
+            )
+            return
         
+        # Сохраняем данные поста
         context.user_data['post_data'] = post_data
         
         current_time = format_moscow_time()
@@ -552,8 +577,19 @@ class ChannelBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
         ]
         
+        # Информация о сохраненном контенте
+        content_info = ""
+        if post_data['type'] == 'text':
+            content_info = f"📝 Текст: {post_data['text'][:50]}..."
+        elif post_data['type'] in ['photo', 'video', 'document']:
+            media_type = {'photo': '🖼 Фото', 'video': '🎥 Видео', 'document': '📎 Документ'}[post_data['type']]
+            content_info = f"{media_type}"
+            if post_data.get('text'):
+                content_info += f" + текст: {post_data['text'][:50]}..."
+        
         await message.reply_text(
             f"✅ Сообщение сохранено!\n"
+            f"{content_info}\n"
             f"🕐 Текущее время: <b>{current_time}</b>\n\n"
             f"Теперь выберите время публикации:",
             parse_mode="HTML",
