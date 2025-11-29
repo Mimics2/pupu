@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 PORT = int(os.getenv('PORT', 8443))
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Например: https://your-app-name.railway.app
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 class ChannelBot:
     def __init__(self, token: str):
@@ -64,8 +64,6 @@ class ChannelBot:
     def save_data(self):
         """Сохранение данных в переменные окружения Railway"""
         try:
-            # В Railway лучше использовать встроенное хранилище, но для простоты
-            # сохраняем в логи (в продакшене лучше использовать базу данных)
             logger.info(f"CHANNELS_DATA: {json.dumps(self.channels)}")
             logger.info(f"SCHEDULED_POSTS: {json.dumps(self.scheduled_posts)}")
         except Exception as e:
@@ -80,22 +78,22 @@ class ChannelBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         keyboard = [
-            [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
-            [InlineKeyboardButton("📋 Список каналов", callback_data="list_channels")],
-            [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
-            [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")]
+            [InlineKeyboardButton("Добавить канал", callback_data="add_channel")],
+            [InlineKeyboardButton("Список каналов", callback_data="list_channels")],
+            [InlineKeyboardButton("Создать пост", callback_data="create_post")],
+            [InlineKeyboardButton("Запланированные посты", callback_data="scheduled_posts")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         if update.message:
             await update.message.reply_text(
-                "🤖 Бот для управления публикациями в каналах\n\n"
+                "Бот для управления публикациями в каналах\n\n"
                 "Выберите действие:",
                 reply_markup=reply_markup
             )
         else:
             await update.callback_query.edit_message_text(
-                "🤖 Бот для управления публикациями в каналах\n\n"
+                "Бот для управления публикациями в каналах\n\n"
                 "Выберите действие:",
                 reply_markup=reply_markup
             )
@@ -125,6 +123,8 @@ class ChannelBot:
         elif data.startswith("time_"):
             time_minutes = int(data.replace("time_", ""))
             await self.schedule_post(query, time_minutes, context)
+        elif data == "custom_time":
+            await self.request_custom_time(query, context)
         elif data.startswith("cancel_post_"):
             post_id = data.replace("cancel_post_", "")
             await self.cancel_scheduled_post(query, post_id)
@@ -134,10 +134,10 @@ class ChannelBot:
     async def add_channel_menu(self, query):
         """Меню добавления канала"""
         await query.edit_message_text(
-            "📝 Чтобы добавить канал:\n\n"
+            "Чтобы добавить канал:\n\n"
             "1. Добавьте бота в канал как администратора\n"
             "2. Отправьте ID канала в формате:\n"
-            "   <code>@username_channel</code> или <code>-1001234567890</code>\n\n"
+            "<code>@username_channel</code> или <code>-1001234567890</code>\n\n"
             "Отправьте ID канала:",
             parse_mode="HTML"
         )
@@ -145,24 +145,24 @@ class ChannelBot:
     async def list_channels_menu(self, query):
         """Меню списка каналов"""
         if not self.channels:
-            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
+            keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
             await query.edit_message_text(
-                "📭 Нет добавленных каналов",
+                "Нет добавленных каналов",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        text = "📋 Список каналов:\n\n"
+        text = "Список каналов:\n\n"
         keyboard = []
         
         for channel_id, channel_name in self.channels.items():
             text += f"• {channel_name} (<code>{channel_id}</code>)\n"
             keyboard.append([
-                InlineKeyboardButton(f"❌ Удалить {channel_name}", 
+                InlineKeyboardButton(f"Удалить {channel_name}", 
                                    callback_data=f"delete_channel_{channel_id}")
             ])
         
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        keyboard.append([InlineKeyboardButton("Назад", callback_data="back_to_main")])
         
         await query.edit_message_text(
             text,
@@ -173,9 +173,9 @@ class ChannelBot:
     async def create_post_menu(self, query):
         """Меню создания поста"""
         if not self.channels:
-            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
+            keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
             await query.edit_message_text(
-                "❌ Сначала добавьте каналы",
+                "Сначала добавьте каналы",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
@@ -183,47 +183,59 @@ class ChannelBot:
         keyboard = []
         for channel_id, channel_name in self.channels.items():
             keyboard.append([
-                InlineKeyboardButton(f"📢 {channel_name}", 
+                InlineKeyboardButton(f"{channel_name}", 
                                    callback_data=f"select_channel_{channel_id}")
             ])
         
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        keyboard.append([InlineKeyboardButton("Назад", callback_data="back_to_main")])
         
         await query.edit_message_text(
-            "🎯 Выберите канал для публикации:",
+            "Выберите канал для публикации:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
     async def select_time_menu(self, query):
         """Меню выбора времени публикации"""
         keyboard = [
-            [InlineKeyboardButton("⏰ Через 15 минут", callback_data="time_15")],
-            [InlineKeyboardButton("⏰ Через 30 минут", callback_data="time_30")],
-            [InlineKeyboardButton("⏰ Через 1 час", callback_data="time_60")],
-            [InlineKeyboardButton("⏰ Через 3 часа", callback_data="time_180")],
-            [InlineKeyboardButton("⏰ Через 6 часов", callback_data="time_360")],
-            [InlineKeyboardButton("⏰ Через 12 часов", callback_data="time_720")],
-            [InlineKeyboardButton("⏰ Через 24 часа", callback_data="time_1440")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+            [InlineKeyboardButton("15 минут", callback_data="time_15")],
+            [InlineKeyboardButton("30 минут", callback_data="time_30")],
+            [InlineKeyboardButton("1 час", callback_data="time_60")],
+            [InlineKeyboardButton("3 часа", callback_data="time_180")],
+            [InlineKeyboardButton("6 часов", callback_data="time_360")],
+            [InlineKeyboardButton("12 часов", callback_data="time_720")],
+            [InlineKeyboardButton("24 часа", callback_data="time_1440")],
+            [InlineKeyboardButton("Другое время", callback_data="custom_time")],
+            [InlineKeyboardButton("Назад", callback_data="create_post")]
         ]
         
         channel_id = query.data.replace("select_channel_", "")
         channel_name = self.channels.get(channel_id, "Неизвестный канал")
         
         await query.edit_message_text(
-            f"⏰ Выберите время публикации для канала <b>{channel_name}</b>\n\n"
+            f"Выберите время публикации для канала <b>{channel_name}</b>\n\n"
             "Теперь отправьте сообщение (текст, фото, видео или документ) которое нужно опубликовать:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
+    async def request_custom_time(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Запрос пользовательского времени"""
+        await query.edit_message_text(
+            "Введите время публикации в формате:\n"
+            "<code>ДД.ММ.ГГГГ-ЧЧ.ММ</code>\n\n"
+            "Например: <code>27.11.2024-19.30</code>\n\n"
+            "Отправьте время в указанном формате:",
+            parse_mode="HTML"
+        )
+        context.user_data['waiting_for_custom_time'] = True
+    
     async def schedule_post(self, query, time_minutes: int, context: ContextTypes.DEFAULT_TYPE):
         """Планирование поста"""
         if 'post_data' not in context.user_data:
             await query.edit_message_text(
-                "❌ Сначала отправьте сообщение для публикации",
+                "Сначала отправьте сообщение для публикации",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+                    [InlineKeyboardButton("Назад", callback_data="create_post")]
                 ])
             )
             return
@@ -231,9 +243,9 @@ class ChannelBot:
         channel_id = context.user_data.get('selected_channel')
         if not channel_id:
             await query.edit_message_text(
-                "❌ Канал не выбран",
+                "Канал не выбран",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+                    [InlineKeyboardButton("Назад", callback_data="create_post")]
                 ])
             )
             return
@@ -241,6 +253,10 @@ class ChannelBot:
         post_data = context.user_data['post_data']
         schedule_time = datetime.now() + timedelta(minutes=time_minutes)
         
+        await self._create_scheduled_post(query, context, post_data, channel_id, schedule_time)
+    
+    async def _create_scheduled_post(self, query, context, post_data, channel_id, schedule_time):
+        """Создание запланированного поста"""
         post_id = f"post_{len(self.scheduled_posts)}_{datetime.now().timestamp()}"
         
         scheduled_post = {
@@ -256,23 +272,22 @@ class ChannelBot:
         self.save_data()
         
         # Запуск задачи для отправки
-        asyncio.create_task(
-            self.send_scheduled_post(post_id, schedule_time)
-        )
+        asyncio.create_task(self.send_scheduled_post(post_id, schedule_time))
         
         # Очистка временных данных
         context.user_data.pop('post_data', None)
         context.user_data.pop('selected_channel', None)
+        context.user_data.pop('waiting_for_custom_time', None)
         
         await query.edit_message_text(
-            f"✅ Пост запланирован!\n\n"
-            f"📢 Канал: <b>{scheduled_post['channel_name']}</b>\n"
-            f"⏰ Время отправки: <b>{schedule_time.strftime('%d.%m.%Y %H:%M')}</b>\n"
-            f"📝 Тип: <b>{post_data.get('type', 'текст')}</b>",
+            f"Пост запланирован!\n\n"
+            f"Канал: <b>{scheduled_post['channel_name']}</b>\n"
+            f"Время отправки: <b>{schedule_time.strftime('%d.%m.%Y %H:%M')}</b>\n"
+            f"Тип: <b>{post_data.get('type', 'текст')}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 К запланированным", callback_data="scheduled_posts")],
-                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                [InlineKeyboardButton("К запланированным", callback_data="scheduled_posts")],
+                [InlineKeyboardButton("В главное меню", callback_data="back_to_main")]
             ])
         )
     
@@ -281,31 +296,31 @@ class ChannelBot:
         active_posts = [p for p in self.scheduled_posts if p.get('status') != 'sent']
         
         if not active_posts:
-            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
+            keyboard = [[InlineKeyboardButton("Назад", callback_data="back_to_main")]]
             await query.edit_message_text(
-                "⏰ Нет запланированных постов",
+                "Нет запланированных постов",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        text = "⏰ Запланированные посты:\n\n"
+        text = "Запланированные посты:\n\n"
         keyboard = []
         
         for post in active_posts[:10]:
             scheduled_time = datetime.fromisoformat(post['scheduled_time'])
             time_str = scheduled_time.strftime('%d.%m.%Y %H:%M')
             
-            text += (f"📢 {post['channel_name']}\n"
-                    f"⏰ {time_str}\n"
-                    f"📝 {post['post_data'].get('type', 'текст')}\n"
+            text += (f"{post['channel_name']}\n"
+                    f"{time_str}\n"
+                    f"{post['post_data'].get('type', 'текст')}\n"
                     f"ID: <code>{post['id']}</code>\n\n")
             
             keyboard.append([
-                InlineKeyboardButton(f"❌ Отменить {post['id'][:8]}...", 
+                InlineKeyboardButton(f"Отменить {post['id'][:8]}...", 
                                    callback_data=f"cancel_post_{post['id']}")
             ])
         
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        keyboard.append([InlineKeyboardButton("Назад", callback_data="back_to_main")])
         
         await query.edit_message_text(
             text,
@@ -319,9 +334,9 @@ class ChannelBot:
         self.save_data()
         
         await query.edit_message_text(
-            "✅ Пост отменен",
+            "Пост отменен",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 К запланированным", callback_data="scheduled_posts")]
+                [InlineKeyboardButton("К запланированным", callback_data="scheduled_posts")]
             ])
         )
     
@@ -333,15 +348,53 @@ class ChannelBot:
             self.save_data()
             
             await query.edit_message_text(
-                f"✅ Канал {channel_name} удален",
+                f"Канал {channel_name} удален",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 К списку каналов", callback_data="list_channels")]
+                    [InlineKeyboardButton("К списку каналов", callback_data="list_channels")]
                 ])
             )
     
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик сообщений"""
         message = update.message
+        
+        # Обработка пользовательского времени
+        if context.user_data.get('waiting_for_custom_time'):
+            time_str = message.text.strip()
+            try:
+                # Парсим время из формата ДД.ММ.ГГГГ-ЧЧ.ММ
+                schedule_time = datetime.strptime(time_str, '%d.%m.%Y-%H.%M')
+                
+                if schedule_time <= datetime.now():
+                    await message.reply_text(
+                        "Время должно быть в будущем. Попробуйте еще раз:"
+                    )
+                    return
+                
+                # Продолжаем создание поста
+                if 'post_data' in context.user_data and 'selected_channel' in context.user_data:
+                    post_data = context.user_data['post_data']
+                    channel_id = context.user_data['selected_channel']
+                    
+                    await self._create_scheduled_post(
+                        update, context, post_data, channel_id, schedule_time
+                    )
+                else:
+                    await message.reply_text(
+                        "Ошибка: данные поста не найдены. Начните заново.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("В главное меню", callback_data="back_to_main")]
+                        ])
+                    )
+                    
+            except ValueError:
+                await message.reply_text(
+                    "Неверный формат времени. Используйте: <code>ДД.ММ.ГГГГ-ЧЧ.ММ</code>\n"
+                    "Например: <code>27.11.2024-19.30</code>\n\n"
+                    "Попробуйте еще раз:",
+                    parse_mode="HTML"
+                )
+            return
         
         # Обработка добавления канала
         if message.text and (message.text.startswith('@') or message.text.startswith('-100')):
@@ -350,9 +403,9 @@ class ChannelBot:
             self.save_data()
             
             await message.reply_text(
-                f"✅ Канал {channel_id} добавлен!",
+                f"Канал {channel_id} добавлен!",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    [InlineKeyboardButton("В главное меню", callback_data="back_to_main")]
                 ])
             )
             return
@@ -389,18 +442,19 @@ class ChannelBot:
         
         # Предлагаем выбрать время
         keyboard = [
-            [InlineKeyboardButton("⏰ Через 15 минут", callback_data="time_15")],
-            [InlineKeyboardButton("⏰ Через 30 минут", callback_data="time_30")],
-            [InlineKeyboardButton("⏰ Через 1 час", callback_data="time_60")],
-            [InlineKeyboardButton("⏰ Через 3 часа", callback_data="time_180")],
-            [InlineKeyboardButton("⏰ Через 6 часов", callback_data="time_360")],
-            [InlineKeyboardButton("⏰ Через 12 часов", callback_data="time_720")],
-            [InlineKeyboardButton("⏰ Через 24 часа", callback_data="time_1440")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+            [InlineKeyboardButton("15 минут", callback_data="time_15")],
+            [InlineKeyboardButton("30 минут", callback_data="time_30")],
+            [InlineKeyboardButton("1 час", callback_data="time_60")],
+            [InlineKeyboardButton("3 часа", callback_data="time_180")],
+            [InlineKeyboardButton("6 часов", callback_data="time_360")],
+            [InlineKeyboardButton("12 часов", callback_data="time_720")],
+            [InlineKeyboardButton("24 часа", callback_data="time_1440")],
+            [InlineKeyboardButton("Другое время", callback_data="custom_time")],
+            [InlineKeyboardButton("Назад", callback_data="create_post")]
         ]
         
         await message.reply_text(
-            "✅ Сообщение сохранено! Теперь выберите время публикации:",
+            "Сообщение сохранено! Теперь выберите время публикации:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
@@ -453,7 +507,6 @@ class ChannelBot:
             
         except Exception as e:
             logger.error(f"Ошибка отправки запланированного поста {post_id}: {e}")
-            # Помечаем как ошибку
             if post:
                 post['status'] = 'error'
                 self.save_data()
