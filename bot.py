@@ -68,6 +68,10 @@ class ChannelBot:
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
+        # Очищаем временные данные при старте
+        if context.user_data:
+            context.user_data.clear()
+            
         current_time = format_moscow_time()
         
         keyboard = [
@@ -118,7 +122,9 @@ class ChannelBot:
             await self.delete_channel(query, channel_id)
         elif data.startswith("select_channel_"):
             channel_id = data.replace("select_channel_", "")
+            # Сохраняем выбранный канал в user_data
             context.user_data['selected_channel'] = channel_id
+            context.user_data['waiting_for_content'] = True  # Флаг что ждем контент
             await self.select_time_menu(query, channel_id)
         elif data.startswith("time_"):
             time_minutes = int(data.replace("time_", ""))
@@ -314,6 +320,7 @@ class ChannelBot:
         context.user_data.pop('post_data', None)
         context.user_data.pop('selected_channel', None)
         context.user_data.pop('waiting_for_custom_time', None)
+        context.user_data.pop('waiting_for_content', None)
         
         current_time = format_moscow_time()
         
@@ -408,6 +415,9 @@ class ChannelBot:
         """Обработчик сообщений"""
         message = update.message
         
+        # ДЕБАГ: Логируем состояние user_data
+        logger.info(f"User data state: {context.user_data}")
+        
         # Обработка пользовательского времени (только одна попытка)
         if context.user_data.get('waiting_for_custom_time'):
             time_str = message.text.strip()
@@ -457,6 +467,7 @@ class ChannelBot:
                     # Очистка временных данных
                     context.user_data.pop('post_data', None)
                     context.user_data.pop('selected_channel', None)
+                    context.user_data.pop('waiting_for_content', None)
                     
                     current_time_str = format_moscow_time()
                     
@@ -506,7 +517,18 @@ class ChannelBot:
             )
             return
         
-        # Сохраняем данные поста - ОСНОВНОЕ ИСПРАВЛЕНИЕ!
+        # ОСНОВНОЕ ИСПРАВЛЕНИЕ: Проверяем, ждем ли мы контент для поста
+        if not context.user_data.get('waiting_for_content'):
+            await message.reply_text(
+                "❌ Сначала выберите канал для публикации через меню 'Создать пост'",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
+                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                ])
+            )
+            return
+        
+        # Сохраняем данные поста
         post_data = {}
         
         # Определяем тип контента
@@ -560,8 +582,21 @@ class ChannelBot:
         
         # Сохраняем данные поста
         context.user_data['post_data'] = post_data
+        context.user_data['waiting_for_content'] = False  # Контент получен
         
         current_time = format_moscow_time()
+        channel_id = context.user_data.get('selected_channel', 'Неизвестный канал')
+        channel_name = self.channels.get(channel_id, "Неизвестный канал")
+        
+        # Информация о сохраненном контенте
+        content_info = ""
+        if post_data['type'] == 'text':
+            content_info = f"📝 Текст: {post_data['text'][:50]}..."
+        elif post_data['type'] in ['photo', 'video', 'document']:
+            media_type = {'photo': '🖼 Фото', 'video': '🎥 Видео', 'document': '📎 Документ'}[post_data['type']]
+            content_info = f"{media_type}"
+            if post_data.get('text'):
+                content_info += f" + текст: {post_data['text'][:50]}..."
         
         # Предлагаем выбрать время
         keyboard = [
@@ -577,18 +612,9 @@ class ChannelBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
         ]
         
-        # Информация о сохраненном контенте
-        content_info = ""
-        if post_data['type'] == 'text':
-            content_info = f"📝 Текст: {post_data['text'][:50]}..."
-        elif post_data['type'] in ['photo', 'video', 'document']:
-            media_type = {'photo': '🖼 Фото', 'video': '🎥 Видео', 'document': '📎 Документ'}[post_data['type']]
-            content_info = f"{media_type}"
-            if post_data.get('text'):
-                content_info += f" + текст: {post_data['text'][:50]}..."
-        
         await message.reply_text(
             f"✅ Сообщение сохранено!\n"
+            f"📢 Канал: <b>{channel_name}</b>\n"
             f"{content_info}\n"
             f"🕐 Текущее время: <b>{current_time}</b>\n\n"
             f"Теперь выберите время публикации:",
