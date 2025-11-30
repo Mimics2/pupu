@@ -338,6 +338,51 @@ class ChannelBot:
         else:
             await update.callback_query.edit_message_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
     
+    async def start_from_query(self, query, user_id: int):
+        """Старт из callback query"""
+        current_time = format_moscow_time()
+        tariff = self.get_user_tariff(user_id)
+        
+        if not tariff:
+            # Показываем меню тарифов
+            keyboard = [
+                [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")],
+                [InlineKeyboardButton("ℹ️ О тарифах", callback_data="tariff_info")]
+            ]
+        else:
+            # Основное меню для пользователей с тарифом
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
+                [InlineKeyboardButton("📋 Мои каналы", callback_data="list_channels")],
+                [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
+                [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
+                [InlineKeyboardButton("📊 Статистика", callback_data="user_stats")],
+                [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
+            ]
+            
+            if user_id == ADMIN_ID:
+                keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = f"🤖 Бот для управления публикациями в каналах\n🕐 Московское время: <b>{current_time}</b>\n\n"
+        
+        if tariff:
+            welcome_text += f"💳 Ваш тариф: <b>{tariff['name']}</b>\n"
+            if tariff.get('expires_at'):
+                expires_at = datetime.fromisoformat(tariff['expires_at'])
+                days_left = (expires_at - datetime.now()).days
+                welcome_text += f"⏰ Осталось дней: <b>{days_left}</b>\n"
+            
+            if tariff.get('is_trial'):
+                welcome_text += "🆓 Это пробный период на 7 дней\n"
+        else:
+            welcome_text += "❌ У вас нет активного тарифа\n"
+        
+        welcome_text += "\nВыберите действие:"
+        
+        await query.edit_message_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
+    
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки"""
         query = update.callback_query
@@ -390,6 +435,17 @@ class ChannelBot:
             await self.show_detailed_stats(query)
         elif data == "back_to_main":
             await self.start_from_query(query, user_id)
+    
+    async def show_current_time(self, query):
+        """Показать текущее время"""
+        current_time = format_moscow_time()
+        await query.edit_message_text(
+            f"🕐 Текущее время в Москве:\n<b>{current_time}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+            ])
+        )
     
     async def show_tariffs(self, query):
         """Показать тарифы"""
