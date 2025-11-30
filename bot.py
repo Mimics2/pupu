@@ -29,40 +29,35 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = 6646433980  # Ваш ID администратора
 
 # Московское время
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
-# Тарифы
-TARIFFS = {
+# Тарифные планы
+SUBSCRIPTION_PLANS = {
     "basic": {
-        "name": "🌟 Базовый",
-        "price": "1$",
-        "channels_limit": 1,
+        "name": "💰 Базовый - $1/месяц",
+        "price": 1,
         "posts_per_day": 2,
-        "duration_days": 30,
-        "payment_link": "https://t.me/+oPfRjMNXvH42YTgy"
+        "channels_limit": 1,
+        "subscribe_url": "https://t.me/+oPfRjMNXvH42YTgy"
     },
     "standard": {
-        "name": "💎 Стандарт", 
-        "price": "3$",
-        "channels_limit": 3,
+        "name": "💎 Стандартный - $3/месяц",
+        "price": 3,
         "posts_per_day": 6,
-        "duration_days": 30,
-        "payment_link": "https://t.me/+ieTyNl3xdApjMDgy"
+        "channels_limit": 3,
+        "subscribe_url": "https://t.me/+ieTyNl3xdApjMDgy"
     },
     "premium": {
-        "name": "🚀 Премиум",
-        "price": "5$", 
-        "channels_limit": 999,  # безлимит
-        "posts_per_day": 999,   # безлимит
-        "duration_days": 30,
-        "payment_link": "https://t.me/+Dl9roZ3JY2AwNGI6"
+        "name": "🚀 Премиум - $5/месяц",
+        "price": 5,
+        "posts_per_day": -1,  # -1 означает безлимит
+        "channels_limit": -1,  # -1 означает безлимит
+        "subscribe_url": "https://t.me/+Dl9roZ3JY2AwNGI6"
     }
 }
-
-# Админ ID
-ADMIN_ID = 6646433980
 
 def get_moscow_time():
     """Получить текущее время в Москве"""
@@ -89,108 +84,83 @@ class ChannelBot:
         self.application = Application.builder().token(token).build()
         self.channels: Dict[str, str] = {}
         self.scheduled_posts: List[Dict] = []
-        self.user_tariffs: Dict[int, Dict] = {}  # user_id -> tariff_data
-        self.user_stats: Dict[int, Dict] = {}    # user_id -> stats
+        self.user_subscriptions: Dict[int, Dict] = {}  # user_id -> subscription_data
+        self.user_stats: Dict[int, Dict] = {}  # user_id -> {"posts_today": 0, "last_reset": date}
         self.setup_handlers()
-        
-        # Админ получает безлимит навсегда
-        self.user_tariffs[ADMIN_ID] = {
-            'tariff': 'admin',
-            'name': '👑 Админ',
-            'channels_limit': 999,
-            'posts_per_day': 999,
-            'expires_at': None,  # навсегда
-            'activated_at': datetime.now().isoformat(),
-            'is_trial': False
-        }
     
     def setup_handlers(self):
         """Настройка обработчиков команд"""
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("time", self.current_time))
-        self.application.add_handler(CommandHandler("stats", self.user_stats_command))
         self.application.add_handler(CommandHandler("admin", self.admin_panel))
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
         self.application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, self.message_handler))
     
-    def get_user_tariff(self, user_id: int) -> Dict:
-        """Получить тариф пользователя"""
-        if user_id == ADMIN_ID:
-            return self.user_tariffs.get(user_id, {
-                'tariff': 'admin',
-                'name': '👑 Админ',
-                'channels_limit': 999,
-                'posts_per_day': 999,
-                'expires_at': None,
-                'is_trial': False
-            })
-        
-        user_tariff = self.user_tariffs.get(user_id)
-        
-        # Если у пользователя нет тарифа, даем пробный стандарт на 7 дней
-        if not user_tariff:
-            trial_expires = datetime.now() + timedelta(days=7)
-            user_tariff = {
-                'tariff': 'trial',
-                'name': '🆓 Пробный Стандарт',
-                'channels_limit': 3,
-                'posts_per_day': 6,
-                'expires_at': trial_expires.isoformat(),
-                'activated_at': datetime.now().isoformat(),
-                'is_trial': True
-            }
-            self.user_tariffs[user_id] = user_tariff
-            return user_tariff
-        
-        # Проверяем срок действия тарифа
-        if user_tariff.get('expires_at'):
-            expires_at = datetime.fromisoformat(user_tariff['expires_at'])
-            if expires_at < datetime.now():
-                # Тариф истек, даем пробный если еще не было
-                if not user_tariff.get('had_trial'):
-                    trial_expires = datetime.now() + timedelta(days=7)
-                    new_trial = {
-                        'tariff': 'trial',
-                        'name': '🆓 Пробный Стандарт',
-                        'channels_limit': 3,
-                        'posts_per_day': 6,
-                        'expires_at': trial_expires.isoformat(),
-                        'activated_at': datetime.now().isoformat(),
-                        'is_trial': True,
-                        'had_trial': True
-                    }
-                    self.user_tariffs[user_id] = new_trial
-                    return new_trial
-                else:
-                    # Пробный уже был, удаляем тариф
-                    del self.user_tariffs[user_id]
-                    return None
-        
-        return user_tariff
+    def get_user_plan(self, user_id: int) -> Dict:
+        """Получить тарифный план пользователя"""
+        return self.user_subscriptions.get(user_id, {"plan": "free"})
     
-    def can_user_add_channel(self, user_id: int) -> bool:
-        """Может ли пользователь добавить канал"""
-        tariff = self.get_user_tariff(user_id)
-        if not tariff:
+    def can_user_post(self, user_id: int) -> bool:
+        """Может ли пользователь создать пост"""
+        user_plan = self.get_user_plan(user_id)
+        
+        if user_plan["plan"] == "free":
             return False
         
-        user_channels = [c for c in self.channels.values() if str(user_id) in str(c)]
-        return len(user_channels) < tariff['channels_limit']
-    
-    def can_user_schedule_post(self, user_id: int) -> bool:
-        """Может ли пользователь запланировать пост"""
-        tariff = self.get_user_tariff(user_id)
-        if not tariff:
+        plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+        
+        # Проверка лимита каналов
+        if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
             return False
         
-        # Проверяем лимит постов за сегодня
-        today = datetime.now().date()
-        today_posts = [p for p in self.scheduled_posts 
-                      if p.get('user_id') == user_id 
-                      and datetime.fromisoformat(p['scheduled_time']).date() == today
-                      and p.get('status') != 'cancelled']
+        # Проверка лимита постов
+        if plan_config["posts_per_day"] == -1:
+            return True
         
-        return len(today_posts) < tariff['posts_per_day']
+        # Сброс счетчика если новый день
+        if user_id not in self.user_stats:
+            self.user_stats[user_id] = {"posts_today": 0, "last_reset": get_moscow_time().date()}
+        
+        user_stat = self.user_stats[user_id]
+        today = get_moscow_time().date()
+        
+        if user_stat["last_reset"] != today:
+            user_stat["posts_today"] = 0
+            user_stat["last_reset"] = today
+        
+        return user_stat["posts_today"] < plan_config["posts_per_day"]
+    
+    def increment_user_posts(self, user_id: int):
+        """Увеличить счетчик постов пользователя"""
+        if user_id not in self.user_stats:
+            self.user_stats[user_id] = {"posts_today": 0, "last_reset": get_moscow_time().date()}
+        
+        self.user_stats[user_id]["posts_today"] += 1
+    
+    async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Админ панель"""
+        if update.effective_user.id != ADMIN_ID:
+            await update.message.reply_text("❌ У вас нет доступа к админ панели")
+            return
+        
+        total_users = len(set(list(self.user_subscriptions.keys()) + 
+                            [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
+        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if sub["plan"] != "free"])
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("👥 Управление подписками", callback_data="admin_subscriptions")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        ]
+        
+        await update.message.reply_text(
+            f"👑 Админ Панель\n\n"
+            f"📊 Всего пользователей: {total_users}\n"
+            f"💳 Активных подписок: {active_subscriptions}\n"
+            f"⏰ Запланированных постов: {len([p for p in self.scheduled_posts if p.get('status') != 'sent'])}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     async def current_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать текущее время в Москве"""
@@ -199,90 +169,6 @@ class ChannelBot:
             f"🕐 Текущее время в Москве:\n<b>{current_time}</b>",
             parse_mode="HTML"
         )
-    
-    async def user_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Статистика пользователя"""
-        user_id = update.effective_user.id
-        tariff = self.get_user_tariff(user_id)
-        
-        if not tariff:
-            await update.message.reply_text(
-                "❌ У вас нет активного тарифа\n"
-                "Выберите тариф в меню для начала работы",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")]
-                ])
-            )
-            return
-        
-        # Считаем статистику
-        user_channels = [c for c in self.channels.values() if str(user_id) in str(c)]
-        today = datetime.now().date()
-        today_posts = [p for p in self.scheduled_posts 
-                      if p.get('user_id') == user_id 
-                      and datetime.fromisoformat(p['scheduled_time']).date() == today
-                      and p.get('status') != 'cancelled']
-        
-        text = (
-            f"📊 Ваша статистика:\n\n"
-            f"💳 Тариф: <b>{tariff['name']}</b>\n"
-            f"📢 Каналов: {len(user_channels)}/{tariff['channels_limit']}\n"
-            f"📤 Постов сегодня: {len(today_posts)}/{tariff['posts_per_day']}\n"
-        )
-        
-        if tariff.get('expires_at'):
-            expires_at = datetime.fromisoformat(tariff['expires_at'])
-            days_left = (expires_at - datetime.now()).days
-            text += f"⏰ Осталось дней: <b>{days_left}</b>\n"
-        
-        if tariff.get('is_trial'):
-            text += "\n⚠️ Это пробный период. После окончания выберите тариф\n"
-        
-        await update.message.reply_text(text, parse_mode="HTML")
-    
-    async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Админ панель"""
-        user_id = update.effective_user.id
-        if user_id != ADMIN_ID:
-            await update.message.reply_text("❌ Доступ запрещен")
-            return
-        
-        # Статистика бота
-        all_users = set([p.get('user_id') for p in self.scheduled_posts] + list(self.user_tariffs.keys()))
-        total_users = len(all_users)
-        active_users = len([uid for uid in all_users if self.get_user_tariff(uid)])
-        
-        today_posts = len([p for p in self.scheduled_posts 
-                          if datetime.fromisoformat(p['scheduled_time']).date() == datetime.now().date()])
-        
-        text = (
-            f"👑 Админ панель\n\n"
-            f"📊 Общая статистика:\n"
-            f"• Всего пользователей: {total_users}\n"
-            f"• Активных пользователей: {active_users}\n"
-            f"• Постов сегодня: {today_posts}\n"
-            f"• Всего каналов: {len(self.channels)}\n\n"
-            f"💳 Тарифы:\n"
-        )
-        
-        for tariff_name, count in self.get_tariff_stats().items():
-            text += f"• {tariff_name}: {count} пользователей\n"
-        
-        keyboard = [
-            [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton("📊 Детальная статистика", callback_data="admin_detailed_stats")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    def get_tariff_stats(self) -> Dict[str, int]:
-        """Статистика по тарифам"""
-        stats = {'trial': 0, 'basic': 0, 'standard': 0, 'premium': 0, 'admin': 0}
-        for user_id, tariff in self.user_tariffs.items():
-            tariff_type = tariff.get('tariff', 'trial')
-            stats[tariff_type] += 1
-        return stats
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -293,103 +179,69 @@ class ChannelBot:
             context.user_data.clear()
             
         current_time = format_moscow_time()
-        tariff = self.get_user_tariff(user_id)
+        user_plan = self.get_user_plan(user_id)
         
-        if not tariff:
-            # Показываем меню тарифов
-            keyboard = [
-                [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")],
-                [InlineKeyboardButton("ℹ️ О тарифах", callback_data="tariff_info")]
-            ]
-        else:
-            # Основное меню для пользователей с тарифом
-            keyboard = [
-                [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
-                [InlineKeyboardButton("📋 Мои каналы", callback_data="list_channels")],
-                [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
-                [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
-                [InlineKeyboardButton("📊 Статистика", callback_data="user_stats")],
-                [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
-            ]
-            
-            if user_id == ADMIN_ID:
-                keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
+        # Основное меню
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
+            [InlineKeyboardButton("📋 Список каналов", callback_data="list_channels")],
+            [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
+            [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
+            [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
+        ]
+        
+        # Добавляем админ панель для администратора
+        if user_id == ADMIN_ID:
+            keyboard.append([InlineKeyboardButton("👑 Админ Панель", callback_data="admin_panel")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        welcome_text = f"🤖 Бот для управления публикациями в каналах\n🕐 Московское время: <b>{current_time}</b>\n\n"
+        welcome_text = f"🤖 Бот для управления публикациями в каналах\n"
+        welcome_text += f"🕐 Московское время: <b>{current_time}</b>\n\n"
         
-        if tariff:
-            welcome_text += f"💳 Ваш тариф: <b>{tariff['name']}</b>\n"
-            if tariff.get('expires_at'):
-                expires_at = datetime.fromisoformat(tariff['expires_at'])
-                days_left = (expires_at - datetime.now()).days
-                welcome_text += f"⏰ Осталось дней: <b>{days_left}</b>\n"
-            
-            if tariff.get('is_trial'):
-                welcome_text += "🆓 Это пробный период на 7 дней\n"
+        if user_plan["plan"] == "free":
+            welcome_text += "❌ У вас нет активной подписки\n"
+            welcome_text += "💳 Выберите тарифный план для начала работы\n"
         else:
-            welcome_text += "❌ У вас нет активного тарифа\n"
+            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            welcome_text += f"✅ Ваш тариф: {plan_config['name']}\n"
+            
+            # Показываем статистику использования
+            if user_id in self.user_stats:
+                posts_today = self.user_stats[user_id]["posts_today"]
+                if plan_config["posts_per_day"] == -1:
+                    welcome_text += f"📊 Использовано постов сегодня: {posts_today} (безлимит)\n"
+                else:
+                    welcome_text += f"📊 Использовано постов сегодня: {posts_today}/{plan_config['posts_per_day']}\n"
+            
+            welcome_text += f"📢 Каналов: {len(self.channels)}"
+            if plan_config["channels_limit"] != -1:
+                welcome_text += f"/{plan_config['channels_limit']}"
+            welcome_text += "\n"
         
         welcome_text += "\nВыберите действие:"
         
         if update.message:
-            await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
         else:
-            await update.callback_query.edit_message_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
-    
-    async def start_from_query(self, query, user_id: int):
-        """Старт из callback query"""
-        current_time = format_moscow_time()
-        tariff = self.get_user_tariff(user_id)
-        
-        if not tariff:
-            # Показываем меню тарифов
-            keyboard = [
-                [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")],
-                [InlineKeyboardButton("ℹ️ О тарифах", callback_data="tariff_info")]
-            ]
-        else:
-            # Основное меню для пользователей с тарифом
-            keyboard = [
-                [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
-                [InlineKeyboardButton("📋 Мои каналы", callback_data="list_channels")],
-                [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
-                [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
-                [InlineKeyboardButton("📊 Статистика", callback_data="user_stats")],
-                [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
-            ]
-            
-            if user_id == ADMIN_ID:
-                keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        welcome_text = f"🤖 Бот для управления публикациями в каналах\n🕐 Московское время: <b>{current_time}</b>\n\n"
-        
-        if tariff:
-            welcome_text += f"💳 Ваш тариф: <b>{tariff['name']}</b>\n"
-            if tariff.get('expires_at'):
-                expires_at = datetime.fromisoformat(tariff['expires_at'])
-                days_left = (expires_at - datetime.now()).days
-                welcome_text += f"⏰ Осталось дней: <b>{days_left}</b>\n"
-            
-            if tariff.get('is_trial'):
-                welcome_text += "🆓 Это пробный период на 7 дней\n"
-        else:
-            welcome_text += "❌ У вас нет активного тарифа\n"
-        
-        welcome_text += "\nВыберите действие:"
-        
-        await query.edit_message_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
+            await update.callback_query.edit_message_text(
+                welcome_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
     
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки"""
         query = update.callback_query
         await query.answer()
         
-        user_id = update.effective_user.id
         data = query.data
+        user_id = query.from_user.id
         
         if data == "add_channel":
             await self.add_channel_menu(query, user_id)
@@ -401,40 +253,262 @@ class ChannelBot:
             await self.scheduled_posts_menu(query, user_id)
         elif data == "current_time":
             await self.show_current_time(query)
-        elif data == "user_stats":
-            await self.show_user_stats(query, user_id)
-        elif data == "tariffs":
-            await self.show_tariffs(query)
-        elif data == "tariff_info":
-            await self.show_tariff_info(query)
-        elif data.startswith("select_tariff_"):
-            tariff_name = data.replace("select_tariff_", "")
-            await self.select_tariff(query, user_id, tariff_name)
+        elif data == "subscription_plans":
+            await self.subscription_plans_menu(query)
+        elif data.startswith("subscribe_"):
+            plan_type = data.replace("subscribe_", "")
+            await self.subscribe_menu(query, plan_type)
+        elif data.startswith("confirm_subscribe_"):
+            plan_type = data.replace("confirm_subscribe_", "")
+            await self.confirm_subscription(query, plan_type, user_id)
         elif data.startswith("delete_channel_"):
             channel_id = data.replace("delete_channel_", "")
-            await self.delete_channel(query, user_id, channel_id)
+            await self.delete_channel(query, channel_id)
         elif data.startswith("select_channel_"):
             channel_id = data.replace("select_channel_", "")
             context.user_data['selected_channel'] = channel_id
-            await self.select_time_menu(query, user_id, channel_id)
+            context.user_data['waiting_for_content'] = True
+            await self.select_time_menu(query, channel_id, user_id)
         elif data.startswith("time_"):
             time_minutes = int(data.replace("time_", ""))
-            await self.schedule_post(query, user_id, time_minutes, context)
+            await self.schedule_post(query, time_minutes, context, user_id)
         elif data == "publish_now":
-            await self.publish_now(query, user_id, context)
+            await self.publish_now(query, context, user_id)
         elif data == "custom_time":
             await self.request_custom_time(query, context)
         elif data.startswith("cancel_post_"):
             post_id = data.replace("cancel_post_", "")
-            await self.cancel_scheduled_post(query, user_id, post_id)
-        elif data == "admin_panel":
-            await self.show_admin_panel(query)
-        elif data == "admin_broadcast":
-            await self.start_broadcast(query, context)
-        elif data == "admin_detailed_stats":
-            await self.show_detailed_stats(query)
+            await self.cancel_scheduled_post(query, post_id)
         elif data == "back_to_main":
-            await self.start_from_query(query, user_id)
+            await self.start_from_query(query)
+        elif data == "admin_panel":
+            await self.admin_panel_from_query(query)
+        elif data == "admin_stats":
+            await self.admin_stats(query)
+        elif data == "admin_broadcast":
+            await self.admin_broadcast_menu(query)
+        elif data == "admin_subscriptions":
+            await self.admin_subscriptions_menu(query)
+        elif data.startswith("set_subscription_"):
+            parts = data.replace("set_subscription_", "").split("_")
+            target_user_id = int(parts[0])
+            plan_type = parts[1]
+            await self.admin_set_subscription(query, target_user_id, plan_type)
+    
+    async def admin_panel_from_query(self, query):
+        """Админ панель из callback"""
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет доступа к админ панели")
+            return
+        
+        total_users = len(set(list(self.user_subscriptions.keys()) + 
+                            [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
+        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if sub["plan"] != "free"])
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("👥 Управление подписками", callback_data="admin_subscriptions")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        ]
+        
+        await query.edit_message_text(
+            f"👑 Админ Панель\n\n"
+            f"📊 Всего пользователей: {total_users}\n"
+            f"💳 Активных подписок: {active_subscriptions}\n"
+            f"⏰ Запланированных постов: {len([p for p in self.scheduled_posts if p.get('status') != 'sent'])}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    async def admin_stats(self, query):
+        """Статистика админа"""
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        total_users = len(set(list(self.user_subscriptions.keys()) + 
+                            [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
+        
+        plan_stats = {}
+        for plan in SUBSCRIPTION_PLANS:
+            plan_stats[plan] = len([sub for sub in self.user_subscriptions.values() if sub["plan"] == plan])
+        
+        free_users = total_users - sum(plan_stats.values())
+        
+        stats_text = "📊 Статистика бота:\n\n"
+        stats_text += f"👥 Всего пользователей: {total_users}\n"
+        stats_text += f"👤 Без подписки: {free_users}\n"
+        for plan, config in SUBSCRIPTION_PLANS.items():
+            stats_text += f"{config['name']}: {plan_stats.get(plan, 0)}\n"
+        
+        stats_text += f"\n⏰ Активных постов: {len([p for p in self.scheduled_posts if p.get('status') != 'sent'])}"
+        stats_text += f"\n📢 Всего каналов: {len(self.channels)}"
+        
+        await query.edit_message_text(
+            stats_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")]
+            ])
+        )
+    
+    async def admin_broadcast_menu(self, query):
+        """Меню рассылки"""
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        await query.edit_message_text(
+            "📢 Рассылка сообщения всем пользователям\n\n"
+            "Отправьте сообщение (текст, фото, видео или документ) для рассылки:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")]
+            ])
+        )
+        # Устанавливаем флаг ожидания сообщения для рассылки
+        self.waiting_for_broadcast = True
+    
+    async def admin_subscriptions_menu(self, query):
+        """Управление подписками пользователей"""
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        # Получаем список пользователей с подписками
+        subscribed_users = []
+        for user_id, sub_data in self.user_subscriptions.items():
+            if sub_data["plan"] != "free":
+                try:
+                    user = await self.application.bot.get_chat(user_id)
+                    username = f"@{user.username}" if user.username else f"ID: {user_id}"
+                    subscribed_users.append((user_id, username, sub_data["plan"]))
+                except:
+                    subscribed_users.append((user_id, f"ID: {user_id}", sub_data["plan"]))
+        
+        if not subscribed_users:
+            await query.edit_message_text(
+                "❌ Нет активных подписок",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        text = "👥 Управление подписками:\n\n"
+        keyboard = []
+        
+        for user_id, username, plan in subscribed_users[:10]:  # Ограничиваем первые 10
+            plan_name = SUBSCRIPTION_PLANS[plan]["name"]
+            text += f"👤 {username}\n📦 {plan_name}\n\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(f"❌ Отменить {username}", callback_data=f"set_subscription_{user_id}_free")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")])
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    async def admin_set_subscription(self, query, user_id: int, plan_type: str):
+        """Установка подписки пользователю"""
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        if plan_type == "free":
+            if user_id in self.user_subscriptions:
+                del self.user_subscriptions[user_id]
+            message = "✅ Подписка отменена"
+        else:
+            self.user_subscriptions[user_id] = {
+                "plan": plan_type,
+                "subscribed_at": get_moscow_time().isoformat()
+            }
+            message = f"✅ Установлен тариф: {SUBSCRIPTION_PLANS[plan_type]['name']}"
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 К управлению подписками", callback_data="admin_subscriptions")]
+            ])
+        )
+    
+    async def subscription_plans_menu(self, query):
+        """Меню тарифных планов"""
+        text = "💳 Выберите тарифный план:\n\n"
+        
+        for plan_key, plan_config in SUBSCRIPTION_PLANS.items():
+            text += f"{plan_config['name']}\n"
+            text += f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
+            text += f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
+            text += f"💵 Цена: ${plan_config['price']}/месяц\n\n"
+        
+        keyboard = []
+        for plan_key in SUBSCRIPTION_PLANS:
+            keyboard.append([
+                InlineKeyboardButton(
+                    SUBSCRIPTION_PLANS[plan_key]["name"], 
+                    callback_data=f"subscribe_{plan_key}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    async def subscribe_menu(self, query, plan_type: str):
+        """Меню подписки на тариф"""
+        plan_config = SUBSCRIPTION_PLANS[plan_type]
+        
+        text = f"📋 Детали тарифа:\n\n"
+        text += f"{plan_config['name']}\n"
+        text += f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
+        text += f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
+        text += f"💵 Цена: ${plan_config['price']}/месяц\n\n"
+        text += f"Для активации подписки:\n"
+        text += f"1. Перейдите по ссылке: {plan_config['subscribe_url']}\n"
+        text += f"2. Оплатите подписку\n"
+        text += f"3. Нажмите кнопку подтверждения\n\n"
+        text += f"После оплаты ваша подписка будет активирована автоматически."
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Я оплатил", callback_data=f"confirm_subscribe_{plan_type}")],
+            [InlineKeyboardButton("🔙 К тарифам", callback_data="subscription_plans")]
+        ]
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    
+    async def confirm_subscription(self, query, plan_type: str, user_id: int):
+        """Подтверждение подписки"""
+        # В реальном боте здесь должна быть проверка оплаты через платежную систему
+        # Для демонстрации просто активируем подписку
+        
+        self.user_subscriptions[user_id] = {
+            "plan": plan_type,
+            "subscribed_at": get_moscow_time().isoformat()
+        }
+        
+        plan_config = SUBSCRIPTION_PLANS[plan_type]
+        
+        await query.edit_message_text(
+            f"✅ Подписка активирована!\n\n"
+            f"Теперь у вас доступен тариф: {plan_config['name']}\n"
+            f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
+            f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n\n"
+            f"Можете начинать работу с ботом!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚀 Начать работу", callback_data="back_to_main")]
+            ])
+        )
     
     async def show_current_time(self, query):
         """Показать текущее время"""
@@ -447,207 +521,83 @@ class ChannelBot:
             ])
         )
     
-    async def show_tariffs(self, query):
-        """Показать тарифы"""
-        text = "💳 Выберите тариф:\n\n"
+    async def start_from_query(self, query):
+        """Старт из callback query"""
+        user_id = query.from_user.id
+        current_time = format_moscow_time()
+        user_plan = self.get_user_plan(user_id)
         
-        for tariff_key, tariff in TARIFFS.items():
-            text += (
-                f"{tariff['name']} - {tariff['price']}\n"
-                f"• Каналов: {tariff['channels_limit']}\n"
-                f"• Постов в день: {tariff['posts_per_day']}\n"
-                f"• Длительность: {tariff['duration_days']} дней\n\n"
-            )
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
+            [InlineKeyboardButton("📋 Список каналов", callback_data="list_channels")],
+            [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
+            [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
+            [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
+        ]
         
-        text += "🆓 Каждый новый пользователь получает пробный период:\n"
-        text += "• Стандарт тариф на 7 дней\n• 3 канала\n• 6 постов в день\n"
+        if user_id == ADMIN_ID:
+            keyboard.append([InlineKeyboardButton("👑 Админ Панель", callback_data="admin_panel")])
         
-        keyboard = []
-        for tariff_key in TARIFFS.keys():
-            keyboard.append([InlineKeyboardButton(
-                f"Выбрать {TARIFFS[tariff_key]['name']}", 
-                callback_data=f"select_tariff_{tariff_key}"
-            )])
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        welcome_text = f"🤖 Бот для управления публикациями в каналах\n"
+        welcome_text += f"🕐 Московское время: <b>{current_time}</b>\n\n"
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    async def select_tariff(self, query, user_id: int, tariff_name: str):
-        """Выбор тарифа"""
-        if tariff_name not in TARIFFS:
-            await query.edit_message_text("❌ Тариф не найден")
-            return
+        if user_plan["plan"] == "free":
+            welcome_text += "❌ У вас нет активной подписки\n"
+            welcome_text += "💳 Выберите тарифный план для начала работы\n"
+        else:
+            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            welcome_text += f"✅ Ваш тариф: {plan_config['name']}\n"
+            
+            if user_id in self.user_stats:
+                posts_today = self.user_stats[user_id]["posts_today"]
+                if plan_config["posts_per_day"] == -1:
+                    welcome_text += f"📊 Использовано постов сегодня: {posts_today} (безлимит)\n"
+                else:
+                    welcome_text += f"📊 Использовано постов сегодня: {posts_today}/{plan_config['posts_per_day']}\n"
+            
+            welcome_text += f"📢 Каналов: {len(self.channels)}"
+            if plan_config["channels_limit"] != -1:
+                welcome_text += f"/{plan_config['channels_limit']}"
+            welcome_text += "\n"
         
-        tariff = TARIFFS[tariff_name]
-        payment_link = tariff['payment_link']
+        welcome_text += "\nВыберите действие:"
         
-        text = (
-            f"💳 Вы выбрали: {tariff['name']}\n"
-            f"💰 Стоимость: {tariff['price']}\n"
-            f"📢 Каналов: {tariff['channels_limit']}\n"
-            f"📤 Постов в день: {tariff['posts_per_day']}\n"
-            f"⏰ Длительность: {tariff['duration_days']} дней\n\n"
-            f"Для оплаты перейдите по ссылке:\n{payment_link}\n\n"
-            f"После оплаты напишите @username_admin для активации"
+        await query.edit_message_text(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
         )
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Назад", callback_data="tariffs")]
-        ]))
     
-    async def show_tariff_info(self, query):
-        """Информация о тарифах"""
-        text = "ℹ️ Информация о тарифах:\n\n"
+    async def add_channel_menu(self, query, user_id: int):
+        """Меню добавления канала"""
+        user_plan = self.get_user_plan(user_id)
         
-        for tariff in TARIFFS.values():
-            text += (
-                f"{tariff['name']} - {tariff['price']}\n"
-                f"• Каналов: {tariff['channels_limit']}\n"
-                f"• Постов в день: {tariff['posts_per_day']}\n"
-                f"• Длительность: {tariff['duration_days']} дней\n\n"
-            )
-        
-        text += "🆓 Пробный период:\n"
-        text += "• Стандарт тариф на 7 дней\n• 3 канала\n• 6 постов в день\n\n"
-        text += "💡 После оплаты свяжитесь с админом для активации тарифа"
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]))
-    
-    async def show_user_stats(self, query, user_id: int):
-        """Показать статистику пользователя"""
-        tariff = self.get_user_tariff(user_id)
-        
-        if not tariff:
+        if user_plan["plan"] == "free":
             await query.edit_message_text(
-                "❌ У вас нет активного тарифа",
+                "❌ Для добавления каналов нужна активная подписка\n"
+                "💳 Выберите тарифный план в меню",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")]
+                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ])
             )
             return
         
-        user_channels = [c for c in self.channels.values() if str(user_id) in str(c)]
-        today = datetime.now().date()
-        today_posts = [p for p in self.scheduled_posts 
-                      if p.get('user_id') == user_id 
-                      and datetime.fromisoformat(p['scheduled_time']).date() == today
-                      and p.get('status') != 'cancelled']
+        plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
         
-        text = (
-            f"📊 Ваша статистика:\n\n"
-            f"💳 Тариф: <b>{tariff['name']}</b>\n"
-            f"📢 Каналов: {len(user_channels)}/{tariff['channels_limit']}\n"
-            f"📤 Постов сегодня: {len(today_posts)}/{tariff['posts_per_day']}\n"
-        )
-        
-        if tariff.get('expires_at'):
-            expires_at = datetime.fromisoformat(tariff['expires_at'])
-            days_left = (expires_at - datetime.now()).days
-            text += f"⏰ Осталось дней: <b>{days_left}</b>\n"
-        
-        if tariff.get('is_trial'):
-            text += "\n⚠️ Это пробный период. После окончания выберите тариф\n"
-        
-        await query.edit_message_text(text, parse_mode="HTML")
-    
-    async def show_admin_panel(self, query):
-        """Показать админ панель"""
-        user_id = query.from_user.id
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ Доступ запрещен")
-            return
-        
-        all_users = set([p.get('user_id') for p in self.scheduled_posts] + list(self.user_tariffs.keys()))
-        total_users = len(all_users)
-        active_users = len([uid for uid in all_users if self.get_user_tariff(uid)])
-        today_posts = len([p for p in self.scheduled_posts 
-                          if datetime.fromisoformat(p['scheduled_time']).date() == datetime.now().date()])
-        
-        text = (
-            f"👑 Админ панель\n\n"
-            f"📊 Общая статистика:\n"
-            f"• Всего пользователей: {total_users}\n"
-            f"• Активных пользователей: {active_users}\n"
-            f"• Постов сегодня: {today_posts}\n"
-            f"• Всего каналов: {len(self.channels)}\n"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton("📊 Детальная статистика", callback_data="admin_detailed_stats")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    async def start_broadcast(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать рассылку"""
-        user_id = query.from_user.id
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ Доступ запрещен")
-            return
-        
-        await query.edit_message_text(
-            "📢 Отправьте сообщение для рассылки всем пользователям:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
-        )
-        context.user_data['waiting_for_broadcast'] = True
-    
-    async def show_detailed_stats(self, query):
-        """Детальная статистика"""
-        user_id = query.from_user.id
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ Доступ запрещен")
-            return
-        
-        tariff_stats = self.get_tariff_stats()
-        text = "📊 Детальная статистика по тарифам:\n\n"
-        
-        tariff_display_names = {
-            'trial': '🆓 Пробный',
-            'basic': '🌟 Базовый',
-            'standard': '💎 Стандарт', 
-            'premium': '🚀 Премиум',
-            'admin': '👑 Админ'
-        }
-        
-        for tariff_name, count in tariff_stats.items():
-            display_name = tariff_display_names.get(tariff_name, tariff_name)
-            text += f"• {display_name}: {count} пользователей\n"
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-        ]))
-
-    # ДОБАВЛЕННЫЕ МЕТОДЫ ДЛЯ РАБОТЫ С КАНАЛАМИ И ПОСТАМИ
-
-    async def add_channel_menu(self, query, user_id: int):
-        """Меню добавления канала"""
-        if not self.can_user_add_channel(user_id):
-            tariff = self.get_user_tariff(user_id)
-            if not tariff:
-                await query.edit_message_text(
-                    "❌ У вас нет активного тарифа",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")]
-                    ])
-                )
-            else:
-                user_channels = [c for c in self.channels.values() if str(user_id) in str(c)]
-                await query.edit_message_text(
-                    f"❌ Лимит каналов исчерпан\n"
-                    f"📢 Ваш лимит: {tariff['channels_limit']} каналов\n"
-                    f"📊 Использовано: {len(user_channels)} каналов",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Сменить тариф", callback_data="tariffs")]
-                    ])
-                )
+        if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
+            await query.edit_message_text(
+                f"❌ Достигнут лимит каналов для вашего тарифа\n"
+                f"📢 Максимум: {plan_config['channels_limit']} каналов\n"
+                f"💳 Для увеличения лимита смените тарифный план",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                ])
+            )
             return
         
         await query.edit_message_text(
@@ -658,27 +608,21 @@ class ChannelBot:
             "Отправьте ID канала:",
             parse_mode="HTML"
         )
-        # Устанавливаем флаг, что ждем ID канала
-        query._bot_data = {'waiting_for_channel': True, 'user_id': user_id}
-
+    
     async def list_channels_menu(self, query, user_id: int):
-        """Меню списка каналов пользователя"""
-        user_channels = {cid: cname for cid, cname in self.channels.items() if str(user_id) in str(cname)}
-        
-        if not user_channels:
+        """Меню списка каналов"""
+        if not self.channels:
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
             await query.edit_message_text(
-                "📭 У вас нет добавленных каналов",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-                ])
+                "📭 Нет добавленных каналов",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        text = "📋 Ваши каналы:\n\n"
+        text = "📋 Список каналов:\n\n"
         keyboard = []
         
-        for channel_id, channel_name in user_channels.items():
+        for channel_id, channel_name in self.channels.items():
             text += f"• {channel_name} (<code>{channel_id}</code>)\n"
             keyboard.append([
                 InlineKeyboardButton(f"❌ Удалить {channel_name}", 
@@ -692,65 +636,60 @@ class ChannelBot:
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    async def delete_channel(self, query, user_id: int, channel_id: str):
-        """Удаление канала"""
-        if channel_id in self.channels:
-            channel_name = self.channels[channel_id]
-            # Проверяем, что канал принадлежит пользователю
-            if str(user_id) in str(channel_name):
-                del self.channels[channel_id]
-                await query.edit_message_text(
-                    f"✅ Канал {channel_name} удален",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 К списку каналов", callback_data="list_channels")]
-                    ])
-                )
-            else:
-                await query.edit_message_text("❌ Вы не можете удалить этот канал")
-        else:
-            await query.edit_message_text("❌ Канал не найден")
-
+    
     async def create_post_menu(self, query, user_id: int):
         """Меню создания поста"""
-        if not self.can_user_schedule_post(user_id):
-            tariff = self.get_user_tariff(user_id)
-            if not tariff:
-                await query.edit_message_text(
-                    "❌ У вас нет активного тарифа",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Выбрать тариф", callback_data="tariffs")]
-                    ])
-                )
-            else:
-                today = datetime.now().date()
-                today_posts = [p for p in self.scheduled_posts 
-                              if p.get('user_id') == user_id 
-                              and datetime.fromisoformat(p['scheduled_time']).date() == today
-                              and p.get('status') != 'cancelled']
-                await query.edit_message_text(
-                    f"❌ Лимит постов на сегодня исчерпан\n"
-                    f"📤 Ваш лимит: {tariff['posts_per_day']} постов в день\n"
-                    f"📊 Использовано: {len(today_posts)} постов",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📊 Статистика", callback_data="user_stats")]
-                    ])
-                )
-            return
+        user_plan = self.get_user_plan(user_id)
         
-        user_channels = {cid: cname for cid, cname in self.channels.items() if str(user_id) in str(cname)}
-        
-        if not user_channels:
+        if user_plan["plan"] == "free":
             await query.edit_message_text(
-                "❌ У вас нет добавленных каналов",
+                "❌ Для создания постов нужна активная подписка\n"
+                "💳 Выберите тарифный план в меню",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Добавить канал", callback_data="add_channel")]
+                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ])
             )
             return
         
+        if not self.can_user_post(user_id):
+            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            
+            if user_id in self.user_stats:
+                posts_today = self.user_stats[user_id]["posts_today"]
+                if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
+                    await query.edit_message_text(
+                        f"❌ Достигнут лимит постов на сегодня\n"
+                        f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
+                        f"🕐 Лимит сбросится в 00:00 по Москве",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                        ])
+                    )
+                    return
+            
+            if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
+                await query.edit_message_text(
+                    f"❌ Достигнут лимит каналов\n"
+                    f"📢 Максимум: {plan_config['channels_limit']} каналов\n"
+                    f"💳 Для увеличения лимита смените тариф",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                    ])
+                )
+                return
+        
+        if not self.channels:
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
+            await query.edit_message_text(
+                "❌ Сначала добавьте каналы",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
         keyboard = []
-        for channel_id, channel_name in user_channels.items():
+        for channel_id, channel_name in self.channels.items():
             keyboard.append([
                 InlineKeyboardButton(f"📢 {channel_name}", 
                                    callback_data=f"select_channel_{channel_id}")
@@ -762,13 +701,12 @@ class ChannelBot:
             "🎯 Выберите канал для публикации:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    async def select_time_menu(self, query, user_id: int, channel_id: str):
+    
+    async def select_time_menu(self, query, channel_id: str, user_id: int):
         """Меню выбора времени публикации"""
         channel_name = self.channels.get(channel_id, "Неизвестный канал")
         current_time = format_moscow_time()
         
-        # УПРОЩЕННЫЕ КНОПКИ ВРЕМЕНИ
         keyboard = [
             [InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="publish_now")],
             [InlineKeyboardButton("⏰ 1 час", callback_data="time_60")],
@@ -786,8 +724,8 @@ class ChannelBot:
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    async def publish_now(self, query, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    
+    async def publish_now(self, query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
         """Публикация поста сразу"""
         if 'post_data' not in context.user_data:
             await query.edit_message_text(
@@ -813,6 +751,9 @@ class ChannelBot:
         try:
             # Отправляем пост сразу
             await self._send_post_immediately(post_data, channel_id)
+            
+            # Увеличиваем счетчик постов
+            self.increment_user_posts(user_id)
             
             # Очистка временных данных
             context.user_data.pop('post_data', None)
@@ -841,11 +782,10 @@ class ChannelBot:
                     [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
                 ])
             )
-
+    
     async def _send_post_immediately(self, post_data: Dict, channel_id: str):
         """Немедленная отправка поста"""
         try:
-            # Отправляем сообщение
             if post_data['type'] == 'text':
                 await self.application.bot.send_message(
                     chat_id=channel_id,
@@ -875,7 +815,7 @@ class ChannelBot:
         except Exception as e:
             logger.error(f"Ошибка отправки поста в канал {channel_id}: {e}")
             raise e
-
+    
     async def request_custom_time(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Запрос пользовательского времени"""
         current_time = format_moscow_time()
@@ -888,8 +828,8 @@ class ChannelBot:
             parse_mode="HTML"
         )
         context.user_data['waiting_for_custom_time'] = True
-
-    async def schedule_post(self, query, user_id: int, time_minutes: int, context: ContextTypes.DEFAULT_TYPE):
+    
+    async def schedule_post(self, query, time_minutes: int, context: ContextTypes.DEFAULT_TYPE, user_id: int):
         """Планирование поста"""
         if 'post_data' not in context.user_data:
             await query.edit_message_text(
@@ -911,31 +851,32 @@ class ChannelBot:
             return
         
         post_data = context.user_data['post_data']
-        # Используем московское время для расчета
         schedule_time = get_moscow_time() + timedelta(minutes=time_minutes)
         
-        await self._create_scheduled_post(query, context, post_data, channel_id, schedule_time)
-
-    async def _create_scheduled_post(self, query, context, post_data, channel_id, schedule_time):
+        await self._create_scheduled_post(query, context, post_data, channel_id, schedule_time, user_id)
+    
+    async def _create_scheduled_post(self, query, context, post_data, channel_id, schedule_time, user_id):
         """Создание запланированного поста"""
-        user_id = context.user_data.get('user_id', query.from_user.id)
-        post_id = f"post_{user_id}_{len(self.scheduled_posts)}_{datetime.now().timestamp()}"
+        post_id = f"post_{len(self.scheduled_posts)}_{datetime.now().timestamp()}"
         
         scheduled_post = {
             'id': post_id,
-            'user_id': user_id,
             'channel_id': channel_id,
             'channel_name': self.channels.get(channel_id, "Неизвестный канал"),
             'post_data': post_data,
             'scheduled_time': schedule_time.isoformat(),
             'scheduled_time_moscow': schedule_time.strftime('%d.%m.%Y %H:%M'),
-            'status': 'scheduled'
+            'status': 'scheduled',
+            'user_id': user_id
         }
         
         self.scheduled_posts.append(scheduled_post)
         
         # Запуск задачи для отправки
         asyncio.create_task(self.send_scheduled_post(post_id, schedule_time))
+        
+        # Увеличиваем счетчик постов
+        self.increment_user_posts(user_id)
         
         # Очистка временных данных
         context.user_data.pop('post_data', None)
@@ -957,13 +898,13 @@ class ChannelBot:
                 [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
             ])
         )
-
+    
     async def scheduled_posts_menu(self, query, user_id: int):
         """Меню запланированных постов"""
-        active_posts = [p for p in self.scheduled_posts if p.get('user_id') == user_id and p.get('status') != 'sent']
+        user_posts = [p for p in self.scheduled_posts if p.get('user_id') == user_id and p.get('status') != 'sent']
         current_time = format_moscow_time()
         
-        if not active_posts:
+        if not user_posts:
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
             await query.edit_message_text(
                 f"⏰ Нет запланированных постов\n"
@@ -976,7 +917,7 @@ class ChannelBot:
         text = f"⏰ Ваши запланированные посты:\n🕐 Текущее время: <b>{current_time}</b>\n\n"
         keyboard = []
         
-        for post in active_posts[:10]:
+        for post in user_posts[:10]:
             time_str = post.get('scheduled_time_moscow', 'Неизвестно')
             time_left = ""
             
@@ -1007,164 +948,100 @@ class ChannelBot:
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    async def cancel_scheduled_post(self, query, user_id: int, post_id: str):
+    
+    async def cancel_scheduled_post(self, query, post_id: str):
         """Отмена запланированного поста"""
-        post = next((p for p in self.scheduled_posts if p['id'] == post_id and p.get('user_id') == user_id), None)
-        if post:
-            post['status'] = 'cancelled'
+        self.scheduled_posts = [post for post in self.scheduled_posts if post['id'] != post_id]
+        
+        await query.edit_message_text(
+            "✅ Пост отменен",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 К запланированным", callback_data="scheduled_posts")]
+            ])
+        )
+    
+    async def delete_channel(self, query, channel_id: str):
+        """Удаление канала"""
+        if channel_id in self.channels:
+            channel_name = self.channels[channel_id]
+            del self.channels[channel_id]
+            
             await query.edit_message_text(
-                "✅ Пост отменен",
+                f"✅ Канал {channel_name} удален",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 К запланированным", callback_data="scheduled_posts")]
+                    [InlineKeyboardButton("🔙 К списку каналов", callback_data="list_channels")]
                 ])
             )
-        else:
-            await query.edit_message_text("❌ Пост не найден")
-
-    async def send_scheduled_post(self, post_id: str, schedule_time: datetime):
-        """Отправка запланированного поста"""
-        try:
-            # Получаем текущее время в Москве
-            now_moscow = get_moscow_time()
-            
-            # Если время уже прошло, отправляем сразу
-            if schedule_time <= now_moscow:
-                delay = 0
-            else:
-                # Ждем до указанного времени
-                delay = (schedule_time - now_moscow).total_seconds()
-            
-            if delay > 0:
-                logger.info(f"Ожидание {delay} секунд до отправки поста {post_id}")
-                await asyncio.sleep(delay)
-            
-            # Находим пост
-            post = next((p for p in self.scheduled_posts if p['id'] == post_id and p.get('status') == 'scheduled'), None)
-            if not post:
-                logger.warning(f"Пост {post_id} не найден")
-                return
-            
-            post_data = post['post_data']
-            channel_id = post['channel_id']
-            
-            logger.info(f"Отправка поста {post_id} в канал {channel_id}")
-            
-            # Отправляем сообщение
-            if post_data['type'] == 'text':
-                await self.application.bot.send_message(
-                    chat_id=channel_id,
-                    text=post_data['text']
-                )
-            elif post_data['type'] == 'photo':
-                await self.application.bot.send_photo(
-                    chat_id=channel_id,
-                    photo=post_data['file_id'],
-                    caption=post_data.get('caption', '')
-                )
-            elif post_data['type'] == 'video':
-                await self.application.bot.send_video(
-                    chat_id=channel_id,
-                    video=post_data['file_id'],
-                    caption=post_data.get('caption', '')
-                )
-            elif post_data['type'] == 'document':
-                await self.application.bot.send_document(
-                    chat_id=channel_id,
-                    document=post_data['file_id'],
-                    caption=post_data.get('caption', '')
-                )
-            
-            # Помечаем как отправленный
-            post['status'] = 'sent'
-            current_time = format_moscow_time()
-            logger.info(f"Пост {post_id} успешно отправлен в {current_time}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка отправки запланированного поста {post_id}: {e}")
-            if post:
-                post['status'] = 'error'
-
+    
     async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик сообщений"""
         message = update.message
-        user_id = update.effective_user.id
+        user_id = message.from_user.id
         
-        # Обработка рассылки для админа
-        if context.user_data.get('waiting_for_broadcast') and user_id == ADMIN_ID:
-            # Отправляем сообщение всем пользователям
-            users_to_notify = set()
-            for post in self.scheduled_posts:
-                if post.get('user_id'):
-                    users_to_notify.add(post['user_id'])
-            for uid in self.user_tariffs.keys():
-                users_to_notify.add(uid)
+        # Обработка рассылки от админа
+        if hasattr(self, 'waiting_for_broadcast') and self.waiting_for_broadcast and user_id == ADMIN_ID:
+            self.waiting_for_broadcast = False
+            
+            # Получаем всех пользователей
+            all_users = set(list(self.user_subscriptions.keys()) + 
+                          [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')])
             
             success_count = 0
-            for uid in users_to_notify:
+            error_count = 0
+            
+            # Отправляем сообщение всем пользователям
+            for user_id in all_users:
                 try:
                     if message.text:
-                        await context.bot.send_message(chat_id=uid, text=message.text)
+                        await self.application.bot.send_message(
+                            chat_id=user_id,
+                            text=message.text
+                        )
                     elif message.photo:
-                        await context.bot.send_photo(chat_id=uid, photo=message.photo[-1].file_id, caption=message.caption)
+                        await self.application.bot.send_photo(
+                            chat_id=user_id,
+                            photo=message.photo[-1].file_id,
+                            caption=message.caption or ''
+                        )
                     elif message.video:
-                        await context.bot.send_video(chat_id=uid, video=message.video.file_id, caption=message.caption)
+                        await self.application.bot.send_video(
+                            chat_id=user_id,
+                            video=message.video.file_id,
+                            caption=message.caption or ''
+                        )
                     elif message.document:
-                        await context.bot.send_document(chat_id=uid, document=message.document.file_id, caption=message.caption)
+                        await self.application.bot.send_document(
+                            chat_id=user_id,
+                            document=message.document.file_id,
+                            caption=message.caption or ''
+                        )
                     success_count += 1
+                    await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты
                 except Exception as e:
-                    logger.error(f"Ошибка рассылки пользователю {uid}: {e}")
-            
-            context.user_data.pop('waiting_for_broadcast', None)
-            await message.reply_text(f"✅ Рассылка завершена\nОтправлено: {success_count} пользователям")
-            return
-        
-        # Обработка добавления канала
-        if message.text and (message.text.startswith('@') or message.text.startswith('-100')):
-            channel_id = message.text.strip()
-            
-            # Проверяем лимиты
-            if not self.can_user_add_channel(user_id):
-                tariff = self.get_user_tariff(user_id)
-                user_channels = [c for c in self.channels.values() if str(user_id) in str(c)]
-                await message.reply_text(
-                    f"❌ Лимит каналов исчерпан\n"
-                    f"📢 Ваш лимит: {tariff['channels_limit']} каналов\n"
-                    f"📊 Использовано: {len(user_channels)} каналов",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Сменить тариф", callback_data="tariffs")]
-                    ])
-                )
-                return
-            
-            # Сохраняем канал с привязкой к пользователю
-            self.channels[channel_id] = f"{channel_id} (user:{user_id})"
+                    logger.error(f"Ошибка отправки рассылки пользователю {user_id}: {e}")
+                    error_count += 1
             
             await message.reply_text(
-                f"✅ Канал {channel_id} добавлен!",
+                f"📢 Рассылка завершена:\n"
+                f"✅ Успешно: {success_count}\n"
+                f"❌ Ошибок: {error_count}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📋 Мои каналы", callback_data="list_channels")],
-                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    [InlineKeyboardButton("👑 В админ панель", callback_data="admin_panel")]
                 ])
             )
             return
         
-        # Обработка пользовательского времени (только одна попытка)
+        # Обработка пользовательского времени
         if context.user_data.get('waiting_for_custom_time'):
             time_str = message.text.strip()
-            
-            # Сразу очищаем флаг
             context.user_data.pop('waiting_for_custom_time', None)
             
             try:
-                # Используем правильный парсинг времени
                 schedule_time = parse_custom_time(time_str)
-                
                 current_time = get_moscow_time()
                 
-                # Проверяем что время в будущем (с запасом в 1 минуту)
                 time_difference = (schedule_time - current_time).total_seconds()
-                if time_difference < 60:  # Меньше 1 минуты
+                if time_difference < 60:
                     await message.reply_text(
                         f"❌ Время должно быть в будущем (минимум на 1 минуту позже).\n"
                         f"🕐 Введенное время: <b>{schedule_time.strftime('%d.%m.%Y %H:%M')}</b>\n"
@@ -1176,29 +1053,30 @@ class ChannelBot:
                     )
                     return
                 
-                # Продолжаем создание поста
                 if 'post_data' in context.user_data and 'selected_channel' in context.user_data:
                     post_data = context.user_data['post_data']
                     channel_id = context.user_data['selected_channel']
                     channel_name = self.channels.get(channel_id, "Неизвестный канал")
                     
-                    post_id = f"post_{user_id}_{len(self.scheduled_posts)}_{datetime.now().timestamp()}"
+                    post_id = f"post_{len(self.scheduled_posts)}_{datetime.now().timestamp()}"
                     
                     scheduled_post = {
                         'id': post_id,
-                        'user_id': user_id,
                         'channel_id': channel_id,
                         'channel_name': channel_name,
                         'post_data': post_data,
                         'scheduled_time': schedule_time.isoformat(),
                         'scheduled_time_moscow': schedule_time.strftime('%d.%m.%Y %H:%M'),
-                        'status': 'scheduled'
+                        'status': 'scheduled',
+                        'user_id': user_id
                     }
                     
                     self.scheduled_posts.append(scheduled_post)
                     asyncio.create_task(self.send_scheduled_post(post_id, schedule_time))
                     
-                    # Очистка временных данных
+                    # Увеличиваем счетчик постов
+                    self.increment_user_posts(user_id)
+                    
                     context.user_data.pop('post_data', None)
                     context.user_data.pop('selected_channel', None)
                     context.user_data.pop('waiting_for_content', None)
@@ -1239,6 +1117,44 @@ class ChannelBot:
                 )
             return
         
+        # Обработка добавления канала
+        if message.text and (message.text.startswith('@') or message.text.startswith('-100')):
+            user_plan = self.get_user_plan(user_id)
+            
+            if user_plan["plan"] == "free":
+                await message.reply_text(
+                    "❌ Для добавления каналов нужна активная подписка",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    ])
+                )
+                return
+            
+            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            
+            if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
+                await message.reply_text(
+                    f"❌ Достигнут лимит каналов для вашего тарифа\n"
+                    f"📢 Максимум: {plan_config['channels_limit']} каналов",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💳 Сменить тариф", callback_data="subscription_plans")],
+                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    ])
+                )
+                return
+            
+            channel_id = message.text.strip()
+            self.channels[channel_id] = channel_id
+            
+            await message.reply_text(
+                f"✅ Канал {channel_id} добавлен!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                ])
+            )
+            return
+        
         # Проверяем, ждем ли мы контент для поста
         if not context.user_data.get('waiting_for_content'):
             await message.reply_text(
@@ -1250,12 +1166,37 @@ class ChannelBot:
             )
             return
         
+        # Проверяем может ли пользователь создать пост
+        if not self.can_user_post(user_id):
+            user_plan = self.get_user_plan(user_id)
+            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            
+            if user_id in self.user_stats:
+                posts_today = self.user_stats[user_id]["posts_today"]
+                if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
+                    await message.reply_text(
+                        f"❌ Достигнут лимит постов на сегодня\n"
+                        f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
+                        f"🕐 Лимит сбросится в 00:00 по Москве",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                        ])
+                    )
+                    return
+            
+            await message.reply_text(
+                "❌ Не удалось создать пост. Проверьте лимиты вашего тарифа",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                ])
+            )
+            return
+        
         # Сохраняем данные поста
         post_data = {}
         
-        # Определяем тип контента
         if message.text and not (message.photo or message.video or message.document):
-            # Только текст
             post_data = {
                 'type': 'text',
                 'text': message.text,
@@ -1263,37 +1204,33 @@ class ChannelBot:
                 'chat_id': message.chat_id
             }
         elif message.photo:
-            # Фото с текстом или без
             post_data = {
                 'type': 'photo',
                 'file_id': message.photo[-1].file_id,
                 'caption': message.caption or '',
-                'text': message.caption or '',  # Сохраняем текст подписи
+                'text': message.caption or '',
                 'message_id': message.message_id,
                 'chat_id': message.chat_id
             }
         elif message.video:
-            # Видео с текстом или без
             post_data = {
                 'type': 'video',
                 'file_id': message.video.file_id,
                 'caption': message.caption or '',
-                'text': message.caption or '',  # Сохраняем текст подписи
+                'text': message.caption or '',
                 'message_id': message.message_id,
                 'chat_id': message.chat_id
             }
         elif message.document:
-            # Документ с текстом или без
             post_data = {
                 'type': 'document',
                 'file_id': message.document.file_id,
                 'caption': message.caption or '',
-                'text': message.caption or '',  # Сохраняем текст подписи
+                'text': message.caption or '',
                 'message_id': message.message_id,
                 'chat_id': message.chat_id
             }
         else:
-            # Неизвестный тип сообщения
             await message.reply_text(
                 "❌ Неподдерживаемый тип сообщения. Отправьте текст, фото, видео или документ.",
                 reply_markup=InlineKeyboardMarkup([
@@ -1302,15 +1239,13 @@ class ChannelBot:
             )
             return
         
-        # Сохраняем данные поста
         context.user_data['post_data'] = post_data
-        context.user_data['waiting_for_content'] = False  # Контент получен
+        context.user_data['waiting_for_content'] = False
         
         current_time = format_moscow_time()
         channel_id = context.user_data.get('selected_channel', 'Неизвестный канал')
         channel_name = self.channels.get(channel_id, "Неизвестный канал")
         
-        # Информация о сохраненном контенте
         content_info = ""
         if post_data['type'] == 'text':
             content_info = f"📝 Текст: {post_data['text'][:50]}..."
@@ -1320,7 +1255,6 @@ class ChannelBot:
             if post_data.get('text'):
                 content_info += f" + текст: {post_data['text'][:50]}..."
         
-        # Предлагаем выбрать время
         keyboard = [
             [InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="publish_now")],
             [InlineKeyboardButton("⏰ 1 час", callback_data="time_60")],
@@ -1340,6 +1274,63 @@ class ChannelBot:
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+    
+    async def send_scheduled_post(self, post_id: str, schedule_time: datetime):
+        """Отправка запланированного поста"""
+        try:
+            now_moscow = get_moscow_time()
+            
+            if schedule_time <= now_moscow:
+                delay = 0
+            else:
+                delay = (schedule_time - now_moscow).total_seconds()
+            
+            if delay > 0:
+                logger.info(f"Ожидание {delay} секунд до отправки поста {post_id}")
+                await asyncio.sleep(delay)
+            
+            post = next((p for p in self.scheduled_posts if p['id'] == post_id), None)
+            if not post:
+                logger.warning(f"Пост {post_id} не найден")
+                return
+            
+            post_data = post['post_data']
+            channel_id = post['channel_id']
+            
+            logger.info(f"Отправка поста {post_id} в канал {channel_id}")
+            
+            if post_data['type'] == 'text':
+                await self.application.bot.send_message(
+                    chat_id=channel_id,
+                    text=post_data['text']
+                )
+            elif post_data['type'] == 'photo':
+                await self.application.bot.send_photo(
+                    chat_id=channel_id,
+                    photo=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            elif post_data['type'] == 'video':
+                await self.application.bot.send_video(
+                    chat_id=channel_id,
+                    video=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            elif post_data['type'] == 'document':
+                await self.application.bot.send_document(
+                    chat_id=channel_id,
+                    document=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            
+            post['status'] = 'sent'
+            current_time = format_moscow_time()
+            logger.info(f"Пост {post_id} успешно отправлен в {current_time}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки запланированного поста {post_id}: {e}")
+            if post:
+                post['status'] = 'error'
 
 def main():
     """Основная функция запуска"""
@@ -1347,7 +1338,7 @@ def main():
         raise ValueError("BOT_TOKEN не установлен")
     
     bot = ChannelBot(BOT_TOKEN)
-    print("Бот запущен с полной системой тарифов и каналов...")
+    print("Бот запущен с системой подписок и админ-панелью...")
     bot.application.run_polling()
 
 if __name__ == "__main__":
