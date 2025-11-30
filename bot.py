@@ -43,6 +43,20 @@ def format_moscow_time(dt=None):
         dt = get_moscow_time()
     return dt.strftime('%d.%m.%Y %H:%M')
 
+def parse_custom_time(time_str: str):
+    """Парсинг пользовательского времени с правильной обработкой часового пояса"""
+    try:
+        # Парсим время как наивное (без часового пояса)
+        naive_dt = datetime.strptime(time_str, '%d.%m.%Y-%H.%M')
+        
+        # Предполагаем, что пользователь вводит время в московском поясе
+        # Локализуем в московский пояс
+        moscow_dt = MOSCOW_TZ.localize(naive_dt)
+        
+        return moscow_dt
+    except ValueError as e:
+        raise ValueError(f"Неверный формат времени: {time_str}") from e
+
 class ChannelBot:
     def __init__(self, token: str):
         self.token = token
@@ -79,7 +93,7 @@ class ChannelBot:
             [InlineKeyboardButton("📋 Список каналов", callback_data="list_channels")],
             [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
             [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
-            [InlineKeyboardButton("🕐 Текущее время Москва", callback_data="current_time")]
+            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -129,6 +143,8 @@ class ChannelBot:
         elif data.startswith("time_"):
             time_minutes = int(data.replace("time_", ""))
             await self.schedule_post(query, time_minutes, context)
+        elif data == "publish_now":
+            await self.publish_now(query, context)
         elif data == "custom_time":
             await self.request_custom_time(query, context)
         elif data.startswith("cancel_post_"):
@@ -156,7 +172,7 @@ class ChannelBot:
             [InlineKeyboardButton("📋 Список каналов", callback_data="list_channels")],
             [InlineKeyboardButton("📤 Создать пост", callback_data="create_post")],
             [InlineKeyboardButton("⏰ Запланированные посты", callback_data="scheduled_posts")],
-            [InlineKeyboardButton("🕐 Текущее время Москва", callback_data="current_time")]
+            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -236,16 +252,14 @@ class ChannelBot:
         channel_name = self.channels.get(channel_id, "Неизвестный канал")
         current_time = format_moscow_time()
         
+        # УПРОЩЕННЫЕ КНОПКИ ВРЕМЕНИ
         keyboard = [
-            [InlineKeyboardButton("⏰ 15 минут", callback_data="time_15")],
-            [InlineKeyboardButton("⏰ 30 минут", callback_data="time_30")],
+            [InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="publish_now")],
             [InlineKeyboardButton("⏰ 1 час", callback_data="time_60")],
             [InlineKeyboardButton("⏰ 3 часа", callback_data="time_180")],
             [InlineKeyboardButton("⏰ 6 часов", callback_data="time_360")],
-            [InlineKeyboardButton("⏰ 12 часов", callback_data="time_720")],
             [InlineKeyboardButton("⏰ 24 часа", callback_data="time_1440")],
             [InlineKeyboardButton("🕒 Другое время", callback_data="custom_time")],
-            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")],
             [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
         ]
         
@@ -256,6 +270,95 @@ class ChannelBot:
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+    
+    async def publish_now(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Публикация поста сразу"""
+        if 'post_data' not in context.user_data:
+            await query.edit_message_text(
+                "❌ Сначала отправьте сообщение для публикации",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+                ])
+            )
+            return
+        
+        channel_id = context.user_data.get('selected_channel')
+        if not channel_id:
+            await query.edit_message_text(
+                "❌ Канал не выбран",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+                ])
+            )
+            return
+        
+        post_data = context.user_data['post_data']
+        
+        try:
+            # Отправляем пост сразу
+            await self._send_post_immediately(post_data, channel_id)
+            
+            # Очистка временных данных
+            context.user_data.pop('post_data', None)
+            context.user_data.pop('selected_channel', None)
+            context.user_data.pop('waiting_for_content', None)
+            
+            current_time = format_moscow_time()
+            
+            await query.edit_message_text(
+                f"✅ Пост опубликован!\n\n"
+                f"📢 Канал: <b>{self.channels.get(channel_id, 'Неизвестный канал')}</b>\n"
+                f"🕐 Время публикации: <b>{current_time}</b>\n"
+                f"📝 Тип: <b>{post_data.get('type', 'текст')}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Создать новый пост", callback_data="create_post")],
+                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка публикации поста: {e}")
+            await query.edit_message_text(
+                f"❌ Ошибка публикации: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
+                ])
+            )
+    
+    async def _send_post_immediately(self, post_data: Dict, channel_id: str):
+        """Немедленная отправка поста"""
+        try:
+            # Отправляем сообщение
+            if post_data['type'] == 'text':
+                await self.application.bot.send_message(
+                    chat_id=channel_id,
+                    text=post_data['text']
+                )
+            elif post_data['type'] == 'photo':
+                await self.application.bot.send_photo(
+                    chat_id=channel_id,
+                    photo=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            elif post_data['type'] == 'video':
+                await self.application.bot.send_video(
+                    chat_id=channel_id,
+                    video=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            elif post_data['type'] == 'document':
+                await self.application.bot.send_document(
+                    chat_id=channel_id,
+                    document=post_data['file_id'],
+                    caption=post_data.get('caption', '')
+                )
+            
+            logger.info(f"Пост немедленно отправлен в канал {channel_id}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки поста в канал {channel_id}: {e}")
+            raise e
     
     async def request_custom_time(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Запрос пользовательского времени"""
@@ -415,9 +518,6 @@ class ChannelBot:
         """Обработчик сообщений"""
         message = update.message
         
-        # ДЕБАГ: Логируем состояние user_data
-        logger.info(f"User data state: {context.user_data}")
-        
         # Обработка пользовательского времени (только одна попытка)
         if context.user_data.get('waiting_for_custom_time'):
             time_str = message.text.strip()
@@ -426,15 +526,17 @@ class ChannelBot:
             context.user_data.pop('waiting_for_custom_time', None)
             
             try:
-                # Парсим время из формата ДД.ММ.ГГГГ-ЧЧ.ММ
-                naive_dt = datetime.strptime(time_str, '%d.%m.%Y-%H.%M')
-                # Делаем время московским
-                schedule_time = MOSCOW_TZ.localize(naive_dt)
+                # Используем правильный парсинг времени
+                schedule_time = parse_custom_time(time_str)
                 
                 current_time = get_moscow_time()
-                if schedule_time <= current_time:
+                
+                # Проверяем что время в будущем (с запасом в 1 минуту)
+                time_difference = (schedule_time - current_time).total_seconds()
+                if time_difference < 60:  # Меньше 1 минуты
                     await message.reply_text(
-                        f"❌ Время должно быть в будущем.\n"
+                        f"❌ Время должно быть в будущем (минимум на 1 минуту позже).\n"
+                        f"🕐 Введенное время: <b>{schedule_time.strftime('%d.%m.%Y %H:%M')}</b>\n"
                         f"🕐 Текущее время: <b>{format_moscow_time(current_time)}</b>",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
@@ -491,10 +593,11 @@ class ChannelBot:
                         ])
                     )
                     
-            except ValueError:
+            except ValueError as e:
                 current_time = format_moscow_time()
                 await message.reply_text(
-                    f"❌ Неверный формат времени. Используйте: <code>ДД.ММ.ГГГГ-ЧЧ.ММ</code>\n"
+                    f"❌ Ошибка: {str(e)}\n\n"
+                    f"Используйте формат: <code>ДД.ММ.ГГГГ-ЧЧ.ММ</code>\n"
                     f"🕐 Текущее время: <b>{current_time}</b>\n\n"
                     f"Начните создание поста заново.",
                     parse_mode="HTML",
@@ -517,7 +620,7 @@ class ChannelBot:
             )
             return
         
-        # ОСНОВНОЕ ИСПРАВЛЕНИЕ: Проверяем, ждем ли мы контент для поста
+        # Проверяем, ждем ли мы контент для поста
         if not context.user_data.get('waiting_for_content'):
             await message.reply_text(
                 "❌ Сначала выберите канал для публикации через меню 'Создать пост'",
@@ -598,17 +701,14 @@ class ChannelBot:
             if post_data.get('text'):
                 content_info += f" + текст: {post_data['text'][:50]}..."
         
-        # Предлагаем выбрать время
+        # УПРОЩЕННЫЕ КНОПКИ ВРЕМЕНИ
         keyboard = [
-            [InlineKeyboardButton("⏰ 15 минут", callback_data="time_15")],
-            [InlineKeyboardButton("⏰ 30 минут", callback_data="time_30")],
+            [InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="publish_now")],
             [InlineKeyboardButton("⏰ 1 час", callback_data="time_60")],
             [InlineKeyboardButton("⏰ 3 часа", callback_data="time_180")],
             [InlineKeyboardButton("⏰ 6 часов", callback_data="time_360")],
-            [InlineKeyboardButton("⏰ 12 часов", callback_data="time_720")],
             [InlineKeyboardButton("⏰ 24 часа", callback_data="time_1440")],
             [InlineKeyboardButton("🕒 Другое время", callback_data="custom_time")],
-            [InlineKeyboardButton("🕐 Текущее время", callback_data="current_time")],
             [InlineKeyboardButton("🔙 Назад", callback_data="create_post")]
         ]
         
@@ -691,7 +791,7 @@ def main():
         raise ValueError("BOT_TOKEN не установлен")
     
     bot = ChannelBot(BOT_TOKEN)
-    print("Бот запущен с поддержкой московского времени...")
+    print("Бот запущен с упрощенным интерфейсом...")
     bot.application.run_polling()
 
 if __name__ == "__main__":
