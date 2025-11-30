@@ -638,6 +638,18 @@ class ChannelBot:
         """Меню добавления канала"""
         user_plan = self.get_user_plan(user_id)
         
+        # Админ всегда может добавлять каналы
+        if self.is_admin(user_id):
+            await query.edit_message_text(
+                "📝 Чтобы добавить канал:\n\n"
+                "1. Добавьте бота в канал как администратора\n"
+                "2. Отправьте ID канала в формате:\n"
+                "<code>@username_channel</code> или <code>-1001234567890</code>\n\n"
+                "Отправьте ID канала:",
+                parse_mode="HTML"
+            )
+            return
+        
         if user_plan["plan"] == "free":
             await query.edit_message_text(
                 "❌ Для добавления каналов нужна активная подписка\n"
@@ -649,6 +661,7 @@ class ChannelBot:
             )
             return
         
+        # Только для обычных пользователей с подпиской
         plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
         
         if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
@@ -704,7 +717,8 @@ class ChannelBot:
         """Меню создания поста"""
         user_plan = self.get_user_plan(user_id)
         
-        if user_plan["plan"] == "free":
+        # Админ всегда может создавать посты
+        if not self.is_admin(user_id) and user_plan["plan"] == "free":
             await query.edit_message_text(
                 "❌ Для создания постов нужна активная подписка\n"
                 "💳 Выберите тарифный план в меню",
@@ -716,32 +730,34 @@ class ChannelBot:
             return
         
         if not self.can_user_post(user_id):
-            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
-            
-            if user_id in self.user_stats:
-                posts_today = self.user_stats[user_id]["posts_today"]
-                if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
+            # Для админа всегда можно постить
+            if not self.is_admin(user_id):
+                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                
+                if user_id in self.user_stats:
+                    posts_today = self.user_stats[user_id]["posts_today"]
+                    if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
+                        await query.edit_message_text(
+                            f"❌ Достигнут лимит постов на сегодня\n"
+                            f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
+                            f"🕐 Лимит сбросится в 00:00 по Москве",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                            ])
+                        )
+                        return
+                
+                if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
                     await query.edit_message_text(
-                        f"❌ Достигнут лимит постов на сегодня\n"
-                        f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
-                        f"🕐 Лимит сбросится в 00:00 по Москве",
+                        f"❌ Достигнут лимит каналов\n"
+                        f"📢 Максимум: {plan_config['channels_limit']} каналов\n"
+                        f"💳 Для увеличения лимита смените тариф",
                         reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
                             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                         ])
                     )
                     return
-            
-            if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
-                await query.edit_message_text(
-                    f"❌ Достигнут лимит каналов\n"
-                    f"📢 Максимум: {plan_config['channels_limit']} каналов\n"
-                    f"💳 Для увеличения лимита смените тариф",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
-                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-                    ])
-                )
-                return
         
         if not self.channels:
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
@@ -1247,7 +1263,8 @@ class ChannelBot:
         if message.text and (message.text.startswith('@') or message.text.startswith('-100')):
             user_plan = self.get_user_plan(user_id)
             
-            if user_plan["plan"] == "free":
+            # Админ всегда может добавлять каналы
+            if not self.is_admin(user_id) and user_plan["plan"] == "free":
                 await message.reply_text(
                     "❌ Для добавления каналов нужна активная подписка",
                     reply_markup=InlineKeyboardMarkup([
@@ -1257,18 +1274,20 @@ class ChannelBot:
                 )
                 return
             
-            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
-            
-            if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
-                await message.reply_text(
-                    f"❌ Достигнут лимит каналов для вашего тарифа\n"
-                    f"📢 Максимум: {plan_config['channels_limit']} каналов",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 Сменить тариф", callback_data="subscription_plans")],
-                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
-                    ])
-                )
-                return
+            # Для обычных пользователей проверяем лимиты
+            if not self.is_admin(user_id):
+                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                
+                if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
+                    await message.reply_text(
+                        f"❌ Достигнут лимит каналов для вашего тарифа\n"
+                        f"📢 Максимум: {plan_config['channels_limit']} каналов",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💳 Сменить тариф", callback_data="subscription_plans")],
+                            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                        ])
+                    )
+                    return
             
             channel_id = message.text.strip()
             self.channels[channel_id] = channel_id
@@ -1295,29 +1314,32 @@ class ChannelBot:
         # Проверяем может ли пользователь создать пост
         if not self.can_user_post(user_id):
             user_plan = self.get_user_plan(user_id)
-            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
             
-            if user_id in self.user_stats:
-                posts_today = self.user_stats[user_id]["posts_today"]
-                if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
-                    await message.reply_text(
-                        f"❌ Достигнут лимит постов на сегодня\n"
-                        f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
-                        f"🕐 Лимит сбросится в 00:00 по Москве",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
-                        ])
-                    )
-                    return
-            
-            await message.reply_text(
-                "❌ Не удалось создать пост. Проверьте лимиты вашего тарифа",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
-                    [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
-                ])
-            )
-            return
+            # Админ всегда может создавать посты
+            if not self.is_admin(user_id):
+                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                
+                if user_id in self.user_stats:
+                    posts_today = self.user_stats[user_id]["posts_today"]
+                    if posts_today >= plan_config["posts_per_day"] and plan_config["posts_per_day"] != -1:
+                        await message.reply_text(
+                            f"❌ Достигнут лимит постов на сегодня\n"
+                            f"📊 Использовано: {posts_today}/{plan_config['posts_per_day']}\n"
+                            f"🕐 Лимит сбросится в 00:00 по Москве",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                            ])
+                        )
+                        return
+                
+                await message.reply_text(
+                    "❌ Не удалось создать пост. Проверьте лимиты вашего тарифа",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    ])
+                )
+                return
         
         # Сохраняем данные поста
         post_data = {}
