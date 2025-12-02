@@ -34,36 +34,35 @@ ADMIN_ID = 6646433980  # Ваш ID администратора
 # Московское время
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
-# Тарифные планы и каналы для подписки
-SUBSCRIPTION_PLANS = {
+# Тарифные планы (настройки которые можно менять через админку)
+DEFAULT_SUBSCRIPTION_PLANS = {
     "basic": {
         "name": "💰 Базовый - $1/месяц",
         "price": 1,
         "posts_per_day": 2,
         "channels_limit": 1,
-        "subscribe_url": "https://t.me/+oPfRjMNXvH42YTgy"
+        "subscribe_url": "",  # Ссылка будет настраиваться через админку
+        "channel_id": "",    # ID канала будет настраиваться через админку
+        "duration_days": 30  # Длительность подписки в днях
     },
     "standard": {
         "name": "💎 Стандартный - $3/месяц",
         "price": 3,
         "posts_per_day": 6,
         "channels_limit": 3,
-        "subscribe_url": "https://t.me/+ieTyNl3xdApjMDgy"
+        "subscribe_url": "",  # Ссылка будет настраиваться через админку
+        "channel_id": "",    # ID канала будет настраиваться через админку
+        "duration_days": 30  # Длительность подписки в днях
     },
     "premium": {
         "name": "🚀 Премиум - $5/месяц",
         "price": 5,
         "posts_per_day": -1,
         "channels_limit": -1,
-        "subscribe_url": "https://t.me/+Dl9roZ3JY2AwNGI6"
+        "subscribe_url": "",  # Ссылка будет настраиваться через админку
+        "channel_id": "",    # ID канала будет настраиваться через админку
+        "duration_days": 30  # Длительность подписки в днях
     }
-}
-
-# Юзернеймы каналов для проверки подписки (БОТ ДОЛЖЕН БЫТЬ АДМИНОМ В ЭТИХ КАНАЛАХ!)
-SUBSCRIPTION_CHANNELS = {
-    "basic": "@pupu_basic_channel",    # Замени на реальный юзернейм канала
-    "standard": "@pupu_standard_channel", 
-    "premium": "@pupu_premium_channel"   
 }
 
 def get_moscow_time():
@@ -89,25 +88,53 @@ class ChannelBot:
     def __init__(self, token: str):
         self.token = token
         self.application = Application.builder().token(token).build()
-        self.channels: Dict[str, str] = {}
+        self.channels: Dict[str, str] = {}  # Каналы пользователя для публикаций
         self.scheduled_posts: List[Dict] = []
-        self.user_subscriptions: Dict[int, Dict] = {}
-        self.user_stats: Dict[int, Dict] = {}
+        self.user_subscriptions: Dict[int, Dict] = {}  # user_id -> subscription_data
+        self.user_stats: Dict[int, Dict] = {}  # user_id -> {"posts_today": 0, "last_reset": date}
         self.waiting_for_broadcast = False
+        
+        # Настройки тарифов (загружаем из файла или используем дефолтные)
+        self.subscription_plans = self.load_settings()
+        
         self.setup_handlers()
+    
+    def load_settings(self):
+        """Загрузить настройки тарифов из файла"""
+        try:
+            with open('subscription_settings.json', 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                return settings
+        except FileNotFoundError:
+            # Если файла нет, используем дефолтные настройки
+            return DEFAULT_SUBSCRIPTION_PLANS.copy()
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настроек: {e}")
+            return DEFAULT_SUBSCRIPTION_PLANS.copy()
+    
+    def save_settings(self):
+        """Сохранить настройки тарифов в файл"""
+        try:
+            with open('subscription_settings.json', 'w', encoding='utf-8') as f:
+                json.dump(self.subscription_plans, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения настроек: {e}")
     
     def is_admin(self, user_id: int) -> bool:
         """Проверить является ли пользователь администратором"""
         return user_id == ADMIN_ID
     
     async def check_channel_subscription(self, user_id: int, plan_type: str) -> bool:
-        """Проверить подписку пользователя на канал (бот должен быть админом в канале)"""
+        """Проверить подписку пользователя на канал для конкретного тарифа"""
         try:
-            channel_username = SUBSCRIPTION_CHANNELS[plan_type]
+            channel_id = self.subscription_plans[plan_type]["channel_id"]
+            if not channel_id:
+                logger.error(f"ID канала для тарифа {plan_type} не настроен")
+                return False
             
             # Получаем информацию о участнике канала
             chat_member = await self.application.bot.get_chat_member(
-                chat_id=channel_username,
+                chat_id=channel_id,
                 user_id=user_id
             )
             
@@ -154,18 +181,23 @@ class ChannelBot:
             )
             return
         
-        plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+        plan_config = self.subscription_plans[user_plan["plan"]]
         
         # Проверяем актуальность подписки
         is_subscribed = await self.check_channel_subscription(user_id, user_plan["plan"])
+        is_expired = self.is_subscription_expired(user_id)
         
-        if not is_subscribed:
-            # Если пользователь отписался, снимаем подписку
+        if not is_subscribed or is_expired:
+            # Если пользователь отписался или подписка истекла
             del self.user_subscriptions[user_id]
+            
+            if is_expired:
+                message = "❌ Ваша подписка истекла"
+            else:
+                message = "❌ Ваша подписка деактивирована (вы отписались от канала)"
+            
             await update.message.reply_text(
-                "❌ Ваша подписка деактивирована\n"
-                "Вы отписались от канала подписки\n"
-                "💳 Для возобновления доступа оформите подписку заново",
+                f"{message}\n💳 Для возобновления доступа оформите подписку заново",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")]
                 ])
@@ -173,7 +205,11 @@ class ChannelBot:
             return
         
         # Показываем информацию о подписке
-        text = f"✅ Активная подписка:\n{plan_config['name']}\n\n"
+        expires_at = datetime.fromisoformat(user_plan["expires_at"]).replace(tzinfo=MOSCOW_TZ)
+        days_left = (expires_at - get_moscow_time()).days
+        
+        text = f"✅ Активная подписка:\n{plan_config['name']}\n"
+        text += f"⏳ Дней осталось: {days_left}\n"
         
         if user_id in self.user_stats:
             posts_today = self.user_stats[user_id]["posts_today"]
@@ -196,6 +232,21 @@ class ChannelBot:
         
         return self.user_subscriptions.get(user_id, {"plan": "free"})
     
+    def is_subscription_expired(self, user_id: int) -> bool:
+        """Проверить истекла ли подписка пользователя"""
+        if user_id not in self.user_subscriptions:
+            return True
+        
+        user_plan = self.user_subscriptions[user_id]
+        if "expires_at" not in user_plan:
+            return True
+        
+        try:
+            expires_at = datetime.fromisoformat(user_plan["expires_at"]).replace(tzinfo=MOSCOW_TZ)
+            return get_moscow_time() > expires_at
+        except:
+            return True
+    
     def can_user_post(self, user_id: int) -> bool:
         """Может ли пользователь создать пост"""
         # Админ всегда может постить
@@ -207,7 +258,11 @@ class ChannelBot:
         if user_plan["plan"] == "free":
             return False
         
-        plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+        # Проверяем не истекла ли подписка
+        if self.is_subscription_expired(user_id):
+            return False
+        
+        plan_config = self.subscription_plans[user_plan["plan"]]
         
         # Проверка лимита каналов
         if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
@@ -249,10 +304,11 @@ class ChannelBot:
         
         total_users = len(set(list(self.user_subscriptions.keys()) + 
                             [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
-        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if sub["plan"] != "free"])
+        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if not self.is_subscription_expired(list(self.user_subscriptions.keys())[list(self.user_subscriptions.values()).index(sub)])])
         
         keyboard = [
             [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("⚙️ Настройка тарифов", callback_data="admin_settings")],
             [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton("👥 Управление подписками", callback_data="admin_subscriptions")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
@@ -310,8 +366,14 @@ class ChannelBot:
             welcome_text += "❌ У вас нет активной подписки\n"
             welcome_text += "💳 Выберите тарифный план для начала работы\n"
         else:
-            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            plan_config = self.subscription_plans[user_plan["plan"]]
             welcome_text += f"✅ Ваш тариф: {plan_config['name']}\n"
+            
+            # Показываем сколько дней осталось
+            if "expires_at" in user_plan:
+                expires_at = datetime.fromisoformat(user_plan["expires_at"]).replace(tzinfo=MOSCOW_TZ)
+                days_left = (expires_at - get_moscow_time()).days
+                welcome_text += f"⏳ Дней осталось: {days_left}\n"
             
             # Показываем статистику использования
             if user_id in self.user_stats:
@@ -393,6 +455,8 @@ class ChannelBot:
             await self.admin_stats(query)
         elif data == "admin_broadcast":
             await self.admin_broadcast_menu(query)
+        elif data == "admin_settings":
+            await self.admin_settings_menu(query)
         elif data == "admin_subscriptions":
             await self.admin_subscriptions_menu(query)
         elif data.startswith("set_subscription_"):
@@ -400,6 +464,12 @@ class ChannelBot:
             target_user_id = int(parts[0])
             plan_type = parts[1]
             await self.admin_set_subscription(query, target_user_id, plan_type)
+        elif data.startswith("edit_plan_"):
+            plan_type = data.replace("edit_plan_", "")
+            await self.admin_edit_plan_menu(query, plan_type)
+        elif data.startswith("save_plan_"):
+            plan_type = data.replace("save_plan_", "")
+            await self.admin_save_plan(query, plan_type, context)
     
     async def admin_panel_from_query(self, query):
         """Админ панель из callback"""
@@ -409,10 +479,11 @@ class ChannelBot:
         
         total_users = len(set(list(self.user_subscriptions.keys()) + 
                             [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
-        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if sub["plan"] != "free"])
+        active_subscriptions = len([sub for sub in self.user_subscriptions.values() if not self.is_subscription_expired(list(self.user_subscriptions.keys())[list(self.user_subscriptions.values()).index(sub)])])
         
         keyboard = [
             [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("⚙️ Настройка тарифов", callback_data="admin_settings")],
             [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton("👥 Управление подписками", callback_data="admin_subscriptions")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
@@ -436,7 +507,7 @@ class ChannelBot:
                             [post.get('user_id') for post in self.scheduled_posts if post.get('user_id')]))
         
         plan_stats = {}
-        for plan in SUBSCRIPTION_PLANS:
+        for plan in self.subscription_plans:
             plan_stats[plan] = len([sub for sub in self.user_subscriptions.values() if sub["plan"] == plan])
         
         free_users = total_users - sum(plan_stats.values())
@@ -444,7 +515,7 @@ class ChannelBot:
         stats_text = "📊 Статистика бота:\n\n"
         stats_text += f"👥 Всего пользователей: {total_users}\n"
         stats_text += f"👤 Без подписки: {free_users}\n"
-        for plan, config in SUBSCRIPTION_PLANS.items():
+        for plan, config in self.subscription_plans.items():
             stats_text += f"{config['name']}: {plan_stats.get(plan, 0)}\n"
         
         stats_text += f"\n⏰ Активных постов: {len([p for p in self.scheduled_posts if p.get('status') != 'sent'])}"
@@ -454,6 +525,89 @@ class ChannelBot:
             stats_text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")]
+            ])
+        )
+    
+    async def admin_settings_menu(self, query):
+        """Меню настройки тарифов"""
+        if not self.is_admin(query.from_user.id):
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        text = "⚙️ Настройка тарифных планов:\n\n"
+        
+        for plan_key, plan_config in self.subscription_plans.items():
+            text += f"📋 {plan_config['name']}\n"
+            text += f"   💰 Цена: ${plan_config['price']}/месяц\n"
+            text += f"   📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
+            text += f"   📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
+            text += f"   🔗 Ссылка: {plan_config.get('subscribe_url', 'Не настроена')}\n"
+            text += f"   🆔 ID канала: {plan_config.get('channel_id', 'Не настроен')}\n"
+            text += f"   ⏳ Дней подписки: {plan_config.get('duration_days', 30)}\n\n"
+        
+        keyboard = []
+        for plan_key in self.subscription_plans:
+            keyboard.append([
+                InlineKeyboardButton(f"⚙️ Настроить {self.subscription_plans[plan_key]['name']}", 
+                                   callback_data=f"edit_plan_{plan_key}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("💾 Сохранить настройки", callback_data="save_settings")])
+        keyboard.append([InlineKeyboardButton("🔙 В админ панель", callback_data="admin_panel")])
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    async def admin_edit_plan_menu(self, query, plan_type: str):
+        """Меню редактирования тарифа"""
+        if not self.is_admin(query.from_user.id):
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        plan_config = self.subscription_plans[plan_type]
+        
+        text = f"⚙️ Редактирование тарифа:\n{plan_config['name']}\n\n"
+        text += "Отправьте новые настройки в формате:\n"
+        text += "<code>ссылка_на_канал | id_канала | дней_подписки</code>\n\n"
+        text += f"Пример:\n"
+        text += f"<code>https://t.me/+AbC123 | -1001234567890 | 30</code>\n\n"
+        text += f"Текущие настройки:\n"
+        text += f"🔗 Ссылка: {plan_config.get('subscribe_url', 'Не настроена')}\n"
+        text += f"🆔 ID канала: {plan_config.get('channel_id', 'Не настроен')}\n"
+        text += f"⏳ Дней подписки: {plan_config.get('duration_days', 30)}"
+        
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 К настройкам", callback_data="admin_settings")]
+            ])
+        )
+        
+        # Сохраняем тип тарифа для обработки в message_handler
+        query.message.chat_id
+        # Нужно сохранить в context, но у нас нет доступа к context
+        # Создадим временное хранилище
+        self.waiting_for_plan_settings = {
+            "user_id": query.from_user.id,
+            "plan_type": plan_type
+        }
+    
+    async def admin_save_plan(self, query, plan_type: str, context: ContextTypes.DEFAULT_TYPE):
+        """Сохранить настройки тарифа"""
+        if not self.is_admin(query.from_user.id):
+            await query.edit_message_text("❌ У вас нет доступа")
+            return
+        
+        # Сохраняем настройки в файл
+        self.save_settings()
+        
+        await query.edit_message_text(
+            "✅ Настройки тарифов сохранены!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 К настройкам", callback_data="admin_settings")]
             ])
         )
     
@@ -482,13 +636,18 @@ class ChannelBot:
         # Получаем список пользователей с подписками
         subscribed_users = []
         for user_id, sub_data in self.user_subscriptions.items():
-            if sub_data["plan"] != "free":
-                try:
-                    user = await self.application.bot.get_chat(user_id)
-                    username = f"@{user.username}" if user.username else f"ID: {user_id}"
-                    subscribed_users.append((user_id, username, sub_data["plan"]))
-                except:
-                    subscribed_users.append((user_id, f"ID: {user_id}", sub_data["plan"]))
+            try:
+                user = await self.application.bot.get_chat(user_id)
+                username = f"@{user.username}" if user.username else f"ID: {user_id}"
+                plan_name = self.subscription_plans[sub_data["plan"]]["name"]
+                
+                # Проверяем истекла ли подписка
+                is_expired = self.is_subscription_expired(user_id)
+                status = "✅ Активна" if not is_expired else "❌ Истекла"
+                
+                subscribed_users.append((user_id, username, sub_data["plan"], plan_name, status))
+            except:
+                subscribed_users.append((user_id, f"ID: {user_id}", sub_data["plan"], "Неизвестный тариф", "❌ Ошибка"))
         
         if not subscribed_users:
             await query.edit_message_text(
@@ -502,9 +661,9 @@ class ChannelBot:
         text = "👥 Управление подписками:\n\n"
         keyboard = []
         
-        for user_id, username, plan in subscribed_users[:10]:  # Ограничиваем первые 10
-            plan_name = SUBSCRIPTION_PLANS[plan]["name"]
-            text += f"👤 {username}\n📦 {plan_name}\n\n"
+        for user_id, username, plan_type, plan_name, status in subscribed_users[:10]:
+            text += f"👤 {username}\n"
+            text += f"📦 {plan_name} ({status})\n\n"
             
             keyboard.append([
                 InlineKeyboardButton(f"❌ Отменить {username}", callback_data=f"set_subscription_{user_id}_free")
@@ -528,11 +687,14 @@ class ChannelBot:
                 del self.user_subscriptions[user_id]
             message = "✅ Подписка отменена"
         else:
+            # Устанавливаем подписку на месяц
+            expires_at = get_moscow_time() + timedelta(days=30)
             self.user_subscriptions[user_id] = {
                 "plan": plan_type,
-                "subscribed_at": get_moscow_time().isoformat()
+                "subscribed_at": get_moscow_time().isoformat(),
+                "expires_at": expires_at.isoformat()
             }
-            message = f"✅ Установлен тариф: {SUBSCRIPTION_PLANS[plan_type]['name']}"
+            message = f"✅ Установлен тариф: {self.subscription_plans[plan_type]['name']} на 30 дней"
         
         await query.edit_message_text(
             message,
@@ -545,17 +707,18 @@ class ChannelBot:
         """Меню тарифных планов"""
         text = "💳 Выберите тарифный план:\n\n"
         
-        for plan_key, plan_config in SUBSCRIPTION_PLANS.items():
+        for plan_key, plan_config in self.subscription_plans.items():
             text += f"{plan_config['name']}\n"
             text += f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
             text += f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
-            text += f"💵 Цена: ${plan_config['price']}/месяц\n\n"
+            text += f"💵 Цена: ${plan_config['price']}/месяц\n"
+            text += f"⏳ Длительность: {plan_config.get('duration_days', 30)} дней\n\n"
         
         keyboard = []
-        for plan_key in SUBSCRIPTION_PLANS:
+        for plan_key in self.subscription_plans:
             keyboard.append([
                 InlineKeyboardButton(
-                    SUBSCRIPTION_PLANS[plan_key]["name"], 
+                    self.subscription_plans[plan_key]["name"], 
                     callback_data=f"subscribe_{plan_key}"
                 )
             ])
@@ -569,24 +732,33 @@ class ChannelBot:
     
     async def subscribe_menu(self, query, plan_type: str, user_id: int):
         """Меню подписки на тариф"""
-        plan_config = SUBSCRIPTION_PLANS[plan_type]
+        plan_config = self.subscription_plans[plan_type]
         
-        text = f"📋 Детали тарифа:\n\n"
-        text += f"{plan_config['name']}\n"
+        text = f"📋 Детали тарифа:\n\n{plan_config['name']}\n"
         text += f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
         text += f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
-        text += f"💵 Цена: ${plan_config['price']}/месяц\n\n"
-        text += f"Для активации подписки:\n"
-        text += f"1. Перейдите по ссылке: {plan_config['subscribe_url']}\n"
-        text += f"2. Подпишитесь на канал\n"
-        text += f"3. Нажмите кнопку 'Проверить подписку'\n\n"
-        text += f"После подписки бот проверит ваш статус в канале."
+        text += f"💵 Цена: ${plan_config['price']}/месяц\n"
+        text += f"⏳ Длительность: {plan_config.get('duration_days', 30)} дней\n\n"
         
-        keyboard = [
-            [InlineKeyboardButton("🔗 Перейти к подписке", url=plan_config['subscribe_url'])],
-            [InlineKeyboardButton("✅ Проверить подписку", callback_data=f"confirm_subscribe_{plan_type}")],
-            [InlineKeyboardButton("🔙 К тарифам", callback_data="subscription_plans")]
-        ]
+        if plan_config.get('subscribe_url'):
+            text += f"Для активации подписки:\n"
+            text += f"1. Перейдите по ссылке: {plan_config['subscribe_url']}\n"
+            text += f"2. Подпишитесь на канал\n"
+            text += f"3. Нажмите кнопку 'Проверить подписку'\n\n"
+            text += f"После подписки бот проверит ваш статус в канале."
+            
+            keyboard = [
+                [InlineKeyboardButton("🔗 Перейти к подписке", url=plan_config['subscribe_url'])],
+                [InlineKeyboardButton("✅ Проверить подписку", callback_data=f"confirm_subscribe_{plan_type}")],
+                [InlineKeyboardButton("🔙 К тарифам", callback_data="subscription_plans")]
+            ]
+        else:
+            text += "❌ Ссылка для подписки не настроена администратором.\n"
+            text += "Обратитесь к администратору для получения доступа."
+            
+            keyboard = [
+                [InlineKeyboardButton("🔙 К тарифам", callback_data="subscription_plans")]
+            ]
         
         await query.edit_message_text(
             text,
@@ -615,19 +787,22 @@ class ChannelBot:
             )
             return
         
-        # Активируем подписку
+        # Активируем подписку на месяц
+        plan_config = self.subscription_plans[plan_type]
+        expires_at = get_moscow_time() + timedelta(days=plan_config.get('duration_days', 30))
+        
         self.user_subscriptions[user_id] = {
             "plan": plan_type,
-            "subscribed_at": get_moscow_time().isoformat()
+            "subscribed_at": get_moscow_time().isoformat(),
+            "expires_at": expires_at.isoformat()
         }
-        
-        plan_config = SUBSCRIPTION_PLANS[plan_type]
         
         await query.edit_message_text(
             f"✅ Подписка активирована!\n\n"
             f"Тариф: {plan_config['name']}\n"
             f"📊 Постов в день: {'∞' if plan_config['posts_per_day'] == -1 else plan_config['posts_per_day']}\n"
-            f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n\n"
+            f"📢 Каналов: {'∞' if plan_config['channels_limit'] == -1 else plan_config['channels_limit']}\n"
+            f"⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
             f"Можете начинать работу!",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Начать работу", callback_data="back_to_main")]
@@ -661,8 +836,20 @@ class ChannelBot:
             )
             return
         
+        # Проверяем не истекла ли подписка
+        if self.is_subscription_expired(user_id):
+            await query.edit_message_text(
+                "❌ Ваша подписка истекла\n"
+                "💳 Продлите подписку для добавления каналов",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                ])
+            )
+            return
+        
         # Только для обычных пользователей с подпиской
-        plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+        plan_config = self.subscription_plans[user_plan["plan"]]
         
         if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
             await query.edit_message_text(
@@ -732,7 +919,18 @@ class ChannelBot:
         if not self.can_user_post(user_id):
             # Для админа всегда можно постить
             if not self.is_admin(user_id):
-                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                plan_config = self.subscription_plans[user_plan["plan"]]
+                
+                if self.is_subscription_expired(user_id):
+                    await query.edit_message_text(
+                        "❌ Ваша подписка истекла\n"
+                        "💳 Продлите подписку для создания постов",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                        ])
+                    )
+                    return
                 
                 if user_id in self.user_stats:
                     posts_today = self.user_stats[user_id]["posts_today"]
@@ -1092,8 +1290,13 @@ class ChannelBot:
             welcome_text += "❌ У вас нет активной подписки\n"
             welcome_text += "💳 Выберите тарифный план для начала работы\n"
         else:
-            plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+            plan_config = self.subscription_plans[user_plan["plan"]]
             welcome_text += f"✅ Ваш тариф: {plan_config['name']}\n"
+            
+            if "expires_at" in user_plan:
+                expires_at = datetime.fromisoformat(user_plan["expires_at"]).replace(tzinfo=MOSCOW_TZ)
+                days_left = (expires_at - get_moscow_time()).days
+                welcome_text += f"⏳ Дней осталось: {days_left}\n"
             
             if user_id in self.user_stats:
                 posts_today = self.user_stats[user_id]["posts_today"]
@@ -1119,6 +1322,51 @@ class ChannelBot:
         """Обработчик сообщений"""
         message = update.message
         user_id = message.from_user.id
+        
+        # Обработка настроек тарифов от админа
+        if hasattr(self, 'waiting_for_plan_settings') and self.waiting_for_plan_settings["user_id"] == user_id:
+            settings_data = message.text.strip()
+            plan_type = self.waiting_for_plan_settings["plan_type"]
+            
+            # Разбираем настройки: ссылка | id_канала | дней_подписки
+            parts = settings_data.split('|')
+            if len(parts) >= 3:
+                subscribe_url = parts[0].strip()
+                channel_id = parts[1].strip()
+                try:
+                    duration_days = int(parts[2].strip())
+                except:
+                    duration_days = 30
+                
+                # Сохраняем настройки
+                self.subscription_plans[plan_type]["subscribe_url"] = subscribe_url
+                self.subscription_plans[plan_type]["channel_id"] = channel_id
+                self.subscription_plans[plan_type]["duration_days"] = duration_days
+                
+                # Сохраняем в файл
+                self.save_settings()
+                
+                delattr(self, 'waiting_for_plan_settings')
+                
+                await message.reply_text(
+                    f"✅ Настройки для тарифа '{self.subscription_plans[plan_type]['name']}' сохранены!\n\n"
+                    f"🔗 Ссылка: {subscribe_url}\n"
+                    f"🆔 ID канала: {channel_id}\n"
+                    f"⏳ Дней подписки: {duration_days}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⚙️ К настройкам", callback_data="admin_settings")]
+                    ])
+                )
+                return
+            else:
+                await message.reply_text(
+                    "❌ Неверный формат. Используйте: ссылка | id_канала | дней_подписки\n"
+                    "Пример: https://t.me/+AbC123 | -1001234567890 | 30",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Отмена", callback_data="admin_settings")]
+                    ])
+                )
+                return
         
         # Обработка рассылки от админа
         if self.waiting_for_broadcast and user_id == ADMIN_ID:
@@ -1274,9 +1522,21 @@ class ChannelBot:
                 )
                 return
             
+            # Проверяем не истекла ли подписка
+            if not self.is_admin(user_id) and self.is_subscription_expired(user_id):
+                await message.reply_text(
+                    "❌ Ваша подписка истекла\n"
+                    "💳 Продлите подписку для добавления каналов",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                    ])
+                )
+                return
+            
             # Для обычных пользователей проверяем лимиты
             if not self.is_admin(user_id):
-                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                plan_config = self.subscription_plans[user_plan["plan"]]
                 
                 if plan_config["channels_limit"] != -1 and len(self.channels) >= plan_config["channels_limit"]:
                     await message.reply_text(
@@ -1317,7 +1577,18 @@ class ChannelBot:
             
             # Админ всегда может создавать посты
             if not self.is_admin(user_id):
-                plan_config = SUBSCRIPTION_PLANS[user_plan["plan"]]
+                plan_config = self.subscription_plans[user_plan["plan"]]
+                
+                if self.is_subscription_expired(user_id):
+                    await message.reply_text(
+                        "❌ Ваша подписка истекла\n"
+                        "💳 Продлите подписку для создания постов",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💳 Тарифы", callback_data="subscription_plans")],
+                            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+                        ])
+                    )
+                    return
                 
                 if user_id in self.user_stats:
                     posts_today = self.user_stats[user_id]["posts_today"]
